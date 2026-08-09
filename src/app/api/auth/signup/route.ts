@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { enforceRateLimit, getClientAddress } from '@/lib/rate-limit';
 import { toErrorResponse } from '@/lib/errors';
 import { createEmailVerification } from '@/lib/email-verification';
+import { structuredLog } from '@/lib/observability';
 
 const signupSchema = z.object({
   fullName: z.string().trim().min(2).max(100),
@@ -58,6 +59,11 @@ export async function POST(request: Request) {
       { status: 201 },
     );
   } catch (error: unknown) {
+    structuredLog('error', 'signup_failed', {
+      errorName: error instanceof Error ? error.name : 'UnknownError',
+      errorMessage: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500),
+      errorCode: typeof error === 'object' && error !== null && 'code' in error ? String(error.code) : undefined,
+    });
     return toErrorResponse(error, 'تعذر إنشاء الحساب حاليًا.');
   }
 }

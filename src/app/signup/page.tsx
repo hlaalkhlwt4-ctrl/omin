@@ -122,13 +122,13 @@ export default function SignupPage() {
 
             <div>
               <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
-                كلمة المرور (8 خانات على الأقل)
+                كلمة المرور (10 خانات على الأقل)
               </label>
               <div className="relative">
                 <input
                   type="password"
                   required
-                  minLength={8}
+                  minLength={10}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="••••••••"
