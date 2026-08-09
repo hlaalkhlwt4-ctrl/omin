@@ -7,6 +7,7 @@ import { getCurrentUser } from '@/lib/auth';
 import { createSmtpTransport } from '@/lib/email';
 import { decryptIntegrationConfig, encryptIntegrationConfig, maskSecret } from '@/lib/integration-secrets';
 import { getPlatformSmtpSettings } from '@/lib/platform-providers';
+import { structuredLog } from '@/lib/observability';
 
 const fieldClass = 'mt-1 w-full rounded-xl border border-slate-300 bg-transparent p-3 text-xs dark:border-slate-700';
 const cardClass = 'rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900';
@@ -28,27 +29,44 @@ function safeBaseUrl(value: string) {
 async function saveSmtp(formData: FormData) {
   'use server';
   const user = await requireSuperAdmin();
-  const existingRecord = await db.platformEmailConfig.findUnique({ where: { id: 'default' } });
-  const existing = existingRecord ? decryptIntegrationConfig(existingRecord.encryptedConfig) : {};
-  const config = {
-    host: String(formData.get('host') || '').trim(),
-    port: Number(formData.get('port') || 587),
-    secure: formData.get('secure') === 'on',
-    user: String(formData.get('user') || '').trim(),
-    pass: String(formData.get('pass') || '').trim() || String(existing.pass || ''),
-    fromEmail: String(formData.get('fromEmail') || '').trim(),
-    fromName: String(formData.get('fromName') || 'OmniFlow').trim(),
-  };
-  if (!config.host || !config.user || !config.pass || !config.fromEmail || !Number.isInteger(config.port) || config.port < 1 || config.port > 65535) return;
-  await db.$transaction([
-    db.platformEmailConfig.upsert({
-      where: { id: 'default' },
-      update: { encryptedConfig: encryptIntegrationConfig(config), hostLabel: `${config.host}:${config.port}`, fromEmail: config.fromEmail, status: 'NOT_TESTED', lastError: null },
-      create: { id: 'default', encryptedConfig: encryptIntegrationConfig(config), hostLabel: `${config.host}:${config.port}`, fromEmail: config.fromEmail },
-    }),
-    db.auditLog.create({ data: { actorId: user.id, action: 'PLATFORM_SMTP_UPDATED', targetType: 'PLATFORM_EMAIL_CONFIG', targetId: 'default' } }),
-  ]);
-  revalidatePath('/admin/providers');
+  let result: 'saved' | 'invalid' | 'failed' = 'saved';
+
+  try {
+    const existingRecord = await db.platformEmailConfig.findUnique({ where: { id: 'default' } });
+    const existing = existingRecord ? decryptIntegrationConfig(existingRecord.encryptedConfig) : {};
+    const config = {
+      host: String(formData.get('host') || '').trim(),
+      port: Number(formData.get('port') || 587),
+      secure: formData.get('secure') === 'on',
+      user: String(formData.get('user') || '').trim(),
+      pass: String(formData.get('pass') || '').trim() || String(existing.pass || ''),
+      fromEmail: String(formData.get('fromEmail') || '').trim(),
+      fromName: String(formData.get('fromName') || 'OmniFlow').trim(),
+    };
+
+    if (!config.host || !config.user || !config.pass || !config.fromEmail || !Number.isInteger(config.port) || config.port < 1 || config.port > 65535) {
+      result = 'invalid';
+    } else {
+      await db.$transaction([
+        db.platformEmailConfig.upsert({
+          where: { id: 'default' },
+          update: { encryptedConfig: encryptIntegrationConfig(config), hostLabel: `${config.host}:${config.port}`, fromEmail: config.fromEmail, status: 'NOT_TESTED', lastError: null },
+          create: { id: 'default', encryptedConfig: encryptIntegrationConfig(config), hostLabel: `${config.host}:${config.port}`, fromEmail: config.fromEmail },
+        }),
+        db.auditLog.create({ data: { actorId: user.id, action: 'PLATFORM_SMTP_UPDATED', targetType: 'PLATFORM_EMAIL_CONFIG', targetId: 'default' } }),
+      ]);
+      revalidatePath('/admin/providers');
+    }
+  } catch (error) {
+    result = 'failed';
+    structuredLog('error', 'platform_smtp_save_failed', {
+      actorId: user.id,
+      errorName: error instanceof Error ? error.name : 'UnknownError',
+      errorMessage: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500),
+    });
+  }
+
+  redirect(`/admin/providers?smtp=${result}`);
 }
 
 async function testSmtp(formData: FormData) {
@@ -145,8 +163,9 @@ function StatusBadge({ status }: { status: string }) {
   return <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[10px] font-bold ${connected ? 'bg-emerald-100 text-emerald-700' : failed ? 'bg-rose-100 text-rose-700' : 'bg-slate-100 text-slate-600'}`}>{connected ? <CheckCircle2 className="h-3 w-3" /> : failed ? <XCircle className="h-3 w-3" /> : <ShieldAlert className="h-3 w-3" />}{connected ? 'متصل' : failed ? 'فشل الفحص' : 'غير مفحوص'}</span>;
 }
 
-export default async function PlatformProvidersPage() {
+export default async function PlatformProvidersPage({ searchParams }: { searchParams: Promise<{ smtp?: string }> }) {
   await requireSuperAdmin();
+  const { smtp: smtpResult } = await searchParams;
   const [smtpRecord, models] = await Promise.all([
     db.platformEmailConfig.findUnique({ where: { id: 'default' } }),
     db.platformAiModel.findMany({ orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }] }),
@@ -156,6 +175,10 @@ export default async function PlatformProvidersPage() {
   return <div dir="rtl" className="min-h-screen bg-slate-100 text-slate-950 dark:bg-slate-950 dark:text-white">
     <main className="mx-auto max-w-6xl space-y-7 px-4 py-8">
       <div className="flex flex-wrap items-center justify-between gap-3"><div><Link href="/admin" className="mb-2 inline-flex items-center gap-1 text-xs text-brand-600"><ChevronRight className="h-4 w-4" />العودة إلى Super Admin</Link><h1 className="text-2xl font-extrabold">البريد ونماذج الذكاء الاصطناعي</h1><p className="mt-2 text-sm text-slate-500">إعدادات مركزية لكل المنصة. الأسرار مشفرة ولا تظهر بعد الحفظ.</p></div></div>
+
+      {smtpResult === 'saved' && <p role="status" className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-xs font-bold text-emerald-700">تم حفظ إعدادات SMTP بنجاح. اضغط فحص الاتصال للتأكد من بيانات Hostinger.</p>}
+      {smtpResult === 'invalid' && <p role="alert" className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs font-bold text-amber-700">تحقق من جميع الحقول والمنفذ ثم حاول الحفظ مرة أخرى.</p>}
+      {smtpResult === 'failed' && <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs font-bold text-rose-700">تعذر حفظ إعدادات SMTP. لم يتم كشف أي بيانات سرية، وتم تسجيل سبب المشكلة في الخادم.</p>}
 
       <section className={`${cardClass} space-y-5`}><div className="flex items-center justify-between gap-3"><h2 className="flex items-center gap-2 font-bold"><Mail className="h-5 w-5 text-sky-600" />SMTP للرسائل النظامية</h2><StatusBadge status={smtpRecord?.status || 'NOT_TESTED'} /></div><form action={saveSmtp} className="grid gap-3 md:grid-cols-2"><label className="text-xs font-bold">SMTP Host<input name="host" required defaultValue={String(smtp.host || '')} placeholder="smtp.example.com" className={fieldClass} /></label><label className="text-xs font-bold">Port<input name="port" type="number" min="1" max="65535" required defaultValue={Number(smtp.port || 587)} className={fieldClass} /></label><label className="text-xs font-bold">اسم المستخدم<input name="user" required defaultValue={String(smtp.user || '')} autoComplete="username" className={fieldClass} /></label><label className="text-xs font-bold">كلمة المرور<input name="pass" type="password" autoComplete="new-password" placeholder={maskSecret(String(smtp.pass || ''))} className={fieldClass} /></label><label className="text-xs font-bold">بريد الإرسال<input name="fromEmail" type="email" required defaultValue={String(smtp.fromEmail || '')} className={fieldClass} /></label><label className="text-xs font-bold">اسم المرسل<input name="fromName" required defaultValue={String(smtp.fromName || 'OmniFlow')} className={fieldClass} /></label><label className="flex items-center gap-2 text-xs"><input type="checkbox" name="secure" defaultChecked={Boolean(smtp.secure)} />اتصال SSL مباشر (غالبًا للمنفذ 465)</label><button className="rounded-xl bg-brand-600 px-4 py-3 text-xs font-bold text-white md:col-span-2">حفظ إعداد SMTP</button></form><form action={testSmtp} className="flex flex-wrap gap-2 border-t border-slate-100 pt-4 dark:border-slate-800"><input name="testEmail" type="email" placeholder="بريد اختبار اختياري" className="min-w-56 flex-1 rounded-xl border bg-transparent p-2.5 text-xs" /><button disabled={!smtpRecord} className="rounded-xl border px-4 py-2.5 text-xs font-bold disabled:opacity-40">فحص الاتصال وإرسال اختبار</button></form>{smtpRecord?.lastError && <p className="rounded-xl bg-rose-50 p-3 text-xs text-rose-700">{smtpRecord.lastError}</p>}</section>
 
