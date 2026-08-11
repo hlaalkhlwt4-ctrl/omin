@@ -2,6 +2,11 @@
 
 ## Meta / WhatsApp
 
+تستخدم صفحة التكاملات تسجيل Meta الرسمي بدل إدخال الرموز يدويًا. اضبط
+`META_APP_ID` و`META_APP_SECRET` و`META_OAUTH_REDIRECT_URI` لربط Facebook وInstagram،
+واضبط `META_WHATSAPP_CONFIG_ID` لتفعيل WhatsApp Embedded Signup. يجب أن يطابق عنوان
+إعادة التوجيه القيمة المسجلة داخل تطبيق Meta حرفيًا.
+
 المحول والـWebhook الأساسيان موجودان. لكل Channel حقيقي استخدم:
 
 `https://YOUR_DOMAIN/api/webhooks/meta/CHANNEL_ID`
