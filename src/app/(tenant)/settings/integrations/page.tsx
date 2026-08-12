@@ -1,5 +1,5 @@
 import { revalidatePath } from 'next/cache';
-import { Cable, CheckCircle2, CircleOff, ExternalLink, ShieldCheck } from 'lucide-react';
+import { Cable, CheckCircle2, CircleOff, Clock3, ShieldCheck } from 'lucide-react';
 import nodemailer from 'nodemailer';
 import { db } from '@/lib/db';
 import { requireWorkspaceContext, requireWritableWorkspaceContext } from '@/lib/auth';
@@ -10,11 +10,11 @@ import { getMetaGraphVersion, isMetaOAuthConfigured } from '@/lib/meta-integrati
 import { WhatsAppConnectButton } from './WhatsAppConnectButton';
 
 const providers = [
-  { id: 'WHATSAPP', name: 'WhatsApp Business', note: 'اربط رقمك من نافذة Meta الرسمية، من دون نسخ Access Token أو إعداد Webhook يدويًا.' },
-  { id: 'INSTAGRAM', name: 'Instagram Professional', note: 'سجّل الدخول واختر حساب Business أو Creator. لا تحتاج إلى الشارة الزرقاء.' },
-  { id: 'FACEBOOK', name: 'Facebook Messenger', note: 'سجّل الدخول واختر صفحة تملك صلاحية إدارتها.' },
-  { id: 'EMAIL', name: 'البريد الإلكتروني', note: 'اربط صندوق البريد عبر إعدادات SMTP الخاصة بمزودك.' },
-  { id: 'DEV_MOCK', name: 'المحاكي التطويري', note: 'قناة محلية معزولة لا ترسل رسائل إلى مستلمين حقيقيين.' },
+  { id: 'WHATSAPP', name: 'WhatsApp Business', note: 'اربط رقم واتساب لإدارة المحادثات من صندوق وارد موحّد.', comingSoon: false },
+  { id: 'INSTAGRAM', name: 'Instagram', note: 'إدارة رسائل Instagram والرد عليها من داخل المنصة.', comingSoon: true },
+  { id: 'FACEBOOK', name: 'Facebook Messenger', note: 'استقبال رسائل صفحات Facebook وإدارتها من مكان واحد.', comingSoon: true },
+  { id: 'EMAIL', name: 'البريد الإلكتروني', note: 'اربط صندوق البريد عبر إعدادات SMTP الخاصة بمزودك.', comingSoon: false },
+  { id: 'DEV_MOCK', name: 'المحاكي التطويري', note: 'قناة محلية معزولة لا ترسل رسائل إلى مستلمين حقيقيين.', comingSoon: false },
 ] as const;
 
 const feedback: Record<string, string> = {
@@ -105,18 +105,18 @@ export default async function IntegrationsSettingsPage({ searchParams }: { searc
       const channel = channels.find((item) => item.provider === provider.id);
       const connected = channel?.healthStatus === 'CONNECTED';
       const config = channel?.settingsJson ? decryptIntegrationConfig(channel.settingsJson) : {};
-      const isMeta = provider.id === 'WHATSAPP' || provider.id === 'INSTAGRAM' || provider.id === 'FACEBOOK';
+      const isRemote = provider.id === 'WHATSAPP' || provider.comingSoon;
       return <section key={provider.id} className="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
-        <div className="flex items-start justify-between gap-4"><div><h2 className="flex items-center gap-2 font-bold"><Cable className="h-4 w-4 text-brand-600" />{provider.name}</h2><p className="mt-2 text-xs leading-6 text-slate-500">{provider.note}</p></div><span className={`flex shrink-0 items-center gap-1 rounded-full px-2 py-1 text-[10px] font-bold ${connected ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>{connected ? <CheckCircle2 className="h-3 w-3" /> : <CircleOff className="h-3 w-3" />}{connected ? 'متصل' : 'غير متصل'}</span></div>
-        {connected && <div className="mt-4 rounded-xl bg-emerald-50 p-3 text-xs text-emerald-800"><p className="flex items-center gap-2 font-bold"><ShieldCheck className="h-4 w-4" />{String(config.verifiedName || config.pageName || channel?.name || 'حساب موثوق')}</p>{config.displayPhoneNumber ? <p className="mt-1">{String(config.displayPhoneNumber)}</p> : null}</div>}
+        <div className="flex items-start justify-between gap-4"><div><h2 className="flex items-center gap-2 font-bold"><Cable className="h-4 w-4 text-brand-600" />{provider.name}</h2><p className="mt-2 text-xs leading-6 text-slate-500">{provider.note}</p></div><span className={`flex shrink-0 items-center gap-1 rounded-full px-2 py-1 text-[10px] font-bold ${provider.comingSoon ? 'bg-violet-100 text-violet-700' : connected ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>{provider.comingSoon ? <Clock3 className="h-3 w-3" /> : connected ? <CheckCircle2 className="h-3 w-3" /> : <CircleOff className="h-3 w-3" />}{provider.comingSoon ? 'قريبًا' : connected ? 'متصل' : 'غير متصل'}</span></div>
+        {provider.comingSoon && <div className="mt-4 rounded-xl border border-violet-200 bg-violet-50 p-4 text-xs leading-6 text-violet-800"><p className="font-bold">سيتم إضافته قريبًا</p><p>نعمل على توفير ربط بسيط وآمن لهذه القناة. سنعلن عنه فور جاهزيته.</p></div>}
+        {connected && !provider.comingSoon && <div className="mt-4 rounded-xl bg-emerald-50 p-3 text-xs text-emerald-800"><p className="flex items-center gap-2 font-bold"><ShieldCheck className="h-4 w-4" />{String(config.verifiedName || config.pageName || channel?.name || 'حساب موثوق')}</p>{config.displayPhoneNumber ? <p className="mt-1">{String(config.displayPhoneNumber)}</p> : null}</div>}
         {!connected && provider.id === 'WHATSAPP' && (whatsappReady
           ? <div className="mt-4"><WhatsAppConnectButton appId={process.env.META_APP_ID!} configId={process.env.META_WHATSAPP_CONFIG_ID!} graphVersion={getMetaGraphVersion()} /></div>
           : <p className="mt-4 text-xs text-amber-700">سيظهر زر الربط بعد إكمال إعداد WhatsApp Embedded Signup.</p>)}
-        {!connected && (provider.id === 'INSTAGRAM' || provider.id === 'FACEBOOK') && <a href={`/api/integrations/meta/start?provider=${provider.id}`} aria-disabled={!metaReady} className={`mt-4 inline-flex items-center gap-2 rounded-xl px-4 py-2 text-xs font-bold text-white ${metaReady ? 'bg-blue-600 hover:bg-blue-700' : 'pointer-events-none bg-slate-400'}`}><ExternalLink className="h-4 w-4" />ربط عبر Meta</a>}
-        {!channel && !isMeta && <form action={addLocalChannel} className="mt-4"><input type="hidden" name="provider" value={provider.id} /><button className="rounded-xl border border-slate-300 px-4 py-2 text-xs font-bold dark:border-slate-700">إنشاء إعداد القناة</button></form>}
+        {!channel && !isRemote && <form action={addLocalChannel} className="mt-4"><input type="hidden" name="provider" value={provider.id} /><button className="rounded-xl border border-slate-300 px-4 py-2 text-xs font-bold dark:border-slate-700">إنشاء إعداد القناة</button></form>}
         {channel && provider.id === 'EMAIL' && <form action={saveEmailConfiguration} className="mt-4 grid gap-2"><input type="hidden" name="channelId" value={channel.id} /><input name="host" placeholder={`SMTP host (${String(config.host || 'غير مضبوط')})`} className="rounded-lg border bg-transparent p-2 text-xs" /><div className="grid grid-cols-2 gap-2"><input name="port" type="number" placeholder={`Port (${String(config.port || 587)})`} className="rounded-lg border bg-transparent p-2 text-xs" /><input name="user" placeholder={`User (${String(config.user || 'غير مضبوط')})`} className="rounded-lg border bg-transparent p-2 text-xs" /></div><input name="pass" type="password" autoComplete="new-password" placeholder={`Password (${maskSecret(String(config.pass || ''))})`} className="rounded-lg border bg-transparent p-2 text-xs" /><input name="from" type="email" placeholder={`From (${String(config.from || 'غير مضبوط')})`} className="rounded-lg border bg-transparent p-2 text-xs" /><button className="rounded-lg border px-3 py-2 text-xs font-bold">حفظ مشفرًا</button></form>}
         {channel && provider.id === 'EMAIL' && <form action={testEmailConnection} className="mt-2"><input type="hidden" name="channelId" value={channel.id} /><button className="rounded-lg bg-slate-900 px-3 py-2 text-xs font-bold text-white dark:bg-white dark:text-slate-900">فحص الاتصال</button></form>}
-        {channel && connected && provider.id !== 'DEV_MOCK' && <form action={disconnectChannel} className="mt-3"><input type="hidden" name="channelId" value={channel.id} /><button className="text-xs font-bold text-rose-600">فصل الحساب</button></form>}
+        {channel && connected && !provider.comingSoon && provider.id !== 'DEV_MOCK' && <form action={disconnectChannel} className="mt-3"><input type="hidden" name="channelId" value={channel.id} /><button className="text-xs font-bold text-rose-600">فصل الحساب</button></form>}
       </section>;
     })}</div>
   </div>;
