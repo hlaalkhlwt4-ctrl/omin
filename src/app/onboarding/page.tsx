@@ -3,6 +3,7 @@
 import React, { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Layers, ArrowLeft, ArrowRight, CheckCircle2, Store, Laptop, UserCheck, Briefcase, GraduationCap, Calendar, Sparkles, Loader2 } from 'lucide-react';
+import { CurrencySelect } from '@/components/app/CurrencySelect';
 
 export default function OnboardingWizardPage() {
   const router = useRouter();
@@ -145,17 +146,11 @@ export default function OnboardingWizardPage() {
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">العملة</label>
-                  <select
+                  <CurrencySelect
                     value={currency}
                     onChange={(e) => setCurrency(e.target.value)}
                     className="w-full p-2.5 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl"
-                  >
-                    <option value="SAR">ريال سعودي (SAR)</option>
-                    <option value="AED">درهم إماراتي (AED)</option>
-                    <option value="KWD">دينار كويتي (KWD)</option>
-                    <option value="EGP">جنيه مصري (EGP)</option>
-                    <option value="USD">دولار أمريكي (USD)</option>
-                  </select>
+                  />
                 </div>
                 <div>
                   <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">الضريبة %</label>

@@ -4,12 +4,13 @@ import { issueSession, requireAuthContext, revokeSession, setSessionCookie } fro
 import { z } from 'zod';
 import { toErrorResponse } from '@/lib/errors';
 import { getClientAddress } from '@/lib/rate-limit';
+import { isSupportedCurrency } from '@/lib/currencies';
 
 const workspaceSchema = z.object({
   name: z.string().trim().min(2).max(120),
   businessType: z.enum(['PHYSICAL', 'DIGITAL', 'SERVICE', 'SUBSCRIPTION', 'COURSE', 'BOOKING']).default('PHYSICAL'),
   country: z.string().trim().min(2).max(2).default('SA'),
-  currency: z.string().trim().min(3).max(3).default('SAR'),
+  currency: z.string().trim().length(3).transform((value) => value.toUpperCase()).refine(isSupportedCurrency, 'Unsupported currency').default('SAR'),
   timezone: z.string().trim().max(80).default('Asia/Riyadh'),
   taxRate: z.coerce.number().min(0).max(100).default(15),
   firstProductTitle: z.string().trim().max(160).optional().or(z.literal('')),
@@ -102,6 +103,7 @@ export async function POST(request: Request) {
           workspaceId: workspace.id,
           title: firstProductTitle,
           price: Number(firstProductPrice),
+          currency,
           type: businessType || 'PHYSICAL',
         },
       });
