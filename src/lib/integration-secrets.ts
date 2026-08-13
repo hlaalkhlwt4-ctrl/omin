@@ -2,6 +2,13 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypt
 
 type EncryptedEnvelope = { v: 1; alg: 'aes-256-gcm'; iv: string; tag: string; data: string };
 
+export function isIntegrationEncryptionConfigured() {
+  if (process.env.INTEGRATION_ENCRYPTION_KEY) {
+    try { return Buffer.from(process.env.INTEGRATION_ENCRYPTION_KEY, 'base64').length === 32; } catch { return false; }
+  }
+  return process.env.NODE_ENV !== 'production' && Boolean(process.env.JWT_SECRET);
+}
+
 function encryptionKey() {
   const value = process.env.INTEGRATION_ENCRYPTION_KEY;
   if (value) {

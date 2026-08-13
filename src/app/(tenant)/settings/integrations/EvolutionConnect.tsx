@@ -6,6 +6,12 @@ import { useRouter } from 'next/navigation';
 
 type Status = { configured?: boolean; state?: string; connected?: boolean };
 
+async function readJson<T>(response: Response): Promise<T> {
+  const text = await response.text();
+  if (!text) throw new Error(`لم يُرجع الخادم أي تفاصيل (HTTP ${response.status}).`);
+  try { return JSON.parse(text) as T; } catch { throw new Error(`استجابة الخادم غير صالحة (HTTP ${response.status}).`); }
+}
+
 export function EvolutionConnect({ initiallyConnected }: { initiallyConnected: boolean }) {
   const router = useRouter();
   const [connected, setConnected] = useState(initiallyConnected);
@@ -16,7 +22,7 @@ export function EvolutionConnect({ initiallyConnected }: { initiallyConnected: b
 
   const refreshStatus = useCallback(async () => {
     const response = await fetch('/api/integrations/evolution/status', { cache: 'no-store' });
-    const body = await response.json() as Status;
+    const body = await readJson<Status>(response);
     setState(body.state || 'close');
     if (body.connected) {
       setConnected(true);
@@ -36,7 +42,7 @@ export function EvolutionConnect({ initiallyConnected }: { initiallyConnected: b
     setError('');
     try {
       const response = await fetch('/api/integrations/evolution/connect', { method: 'POST' });
-      const body = await response.json() as { qrCode?: string | null; state?: string; error?: string };
+      const body = await readJson<{ qrCode?: string | null; state?: string; error?: string }>(response);
       if (!response.ok) throw new Error(body.error || 'تعذر بدء الربط.');
       setQrCode(body.qrCode || null);
       setState(body.state || 'connecting');
