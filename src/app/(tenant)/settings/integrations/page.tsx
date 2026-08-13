@@ -6,8 +6,8 @@ import { requireWorkspaceContext, requireWritableWorkspaceContext } from '@/lib/
 import { enforcePermission, type WorkspaceRole } from '@/lib/permissions';
 import { PageHeader } from '@/components/app/PageHeader';
 import { decryptIntegrationConfig, encryptIntegrationConfig, maskSecret } from '@/lib/integration-secrets';
-import { getMetaGraphVersion, isMetaOAuthConfigured } from '@/lib/meta-integration';
-import { WhatsAppConnectButton } from './WhatsAppConnectButton';
+import { isEvolutionConfigured } from '@/lib/evolution-api';
+import { EvolutionConnect } from './EvolutionConnect';
 
 const providers = [
   { id: 'WHATSAPP', name: 'WhatsApp Business', note: 'اربط رقم واتساب لإدارة المحادثات من صندوق وارد موحّد.', comingSoon: false },
@@ -93,14 +93,13 @@ export default async function IntegrationsSettingsPage({ searchParams }: { searc
   const [{ workspaceId, role }, query] = await Promise.all([requireWorkspaceContext(), searchParams]);
   enforcePermission(role as WorkspaceRole, 'settings:manage');
   const channels = await db.channel.findMany({ where: { workspaceId }, orderBy: { createdAt: 'asc' } });
-  const metaReady = isMetaOAuthConfigured();
-  const whatsappReady = metaReady && Boolean(process.env.META_WHATSAPP_CONFIG_ID);
+  const evolutionReady = isEvolutionConfigured();
 
   return <div className="space-y-7 pb-12">
     <PageHeader title="التكاملات والقنوات" description="اربط حسابات نشاطك من نافذة المزود الرسمية. لا حاجة إلى نسخ مفاتيح أو إعداد Webhooks يدويًا." />
     {query.connected && <p className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm font-semibold text-emerald-800">تم ربط القناة بنجاح وأصبحت جاهزة لاستقبال الرسائل.</p>}
     {query.error && <p className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm font-semibold text-rose-800" role="alert">{feedback[query.error] || 'تعذر إكمال عملية الربط.'}</p>}
-    {!metaReady && <div className="rounded-2xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-900"><p className="font-bold">إعداد Meta مطلوب مرة واحدة على مستوى المنصة</p><p className="mt-1 text-xs leading-6">أضف META_APP_ID وMETA_APP_SECRET وMETA_WHATSAPP_CONFIG_ID إلى إعدادات النشر، ثم أعد تشغيل التطبيق.</p></div>}
+    {!evolutionReady && <div className="rounded-2xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-900"><p className="font-bold">إعداد Evolution API غير مكتمل</p><p className="mt-1 text-xs leading-6">أضف EVOLUTION_API_URL وEVOLUTION_API_KEY وEVOLUTION_WEBHOOK_SECRET إلى إعدادات النشر، ثم أعد النشر.</p></div>}
     <div className="grid gap-4 md:grid-cols-2">{providers.map((provider) => {
       const channel = channels.find((item) => item.provider === provider.id);
       const connected = channel?.healthStatus === 'CONNECTED';
@@ -110,9 +109,7 @@ export default async function IntegrationsSettingsPage({ searchParams }: { searc
         <div className="flex items-start justify-between gap-4"><div><h2 className="flex items-center gap-2 font-bold"><Cable className="h-4 w-4 text-brand-600" />{provider.name}</h2><p className="mt-2 text-xs leading-6 text-slate-500">{provider.note}</p></div><span className={`flex shrink-0 items-center gap-1 rounded-full px-2 py-1 text-[10px] font-bold ${provider.comingSoon ? 'bg-violet-100 text-violet-700' : connected ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>{provider.comingSoon ? <Clock3 className="h-3 w-3" /> : connected ? <CheckCircle2 className="h-3 w-3" /> : <CircleOff className="h-3 w-3" />}{provider.comingSoon ? 'قريبًا' : connected ? 'متصل' : 'غير متصل'}</span></div>
         {provider.comingSoon && <div className="mt-4 rounded-xl border border-violet-200 bg-violet-50 p-4 text-xs leading-6 text-violet-800"><p className="font-bold">سيتم إضافته قريبًا</p><p>نعمل على توفير ربط بسيط وآمن لهذه القناة. سنعلن عنه فور جاهزيته.</p></div>}
         {connected && !provider.comingSoon && <div className="mt-4 rounded-xl bg-emerald-50 p-3 text-xs text-emerald-800"><p className="flex items-center gap-2 font-bold"><ShieldCheck className="h-4 w-4" />{String(config.verifiedName || config.pageName || channel?.name || 'حساب موثوق')}</p>{config.displayPhoneNumber ? <p className="mt-1">{String(config.displayPhoneNumber)}</p> : null}</div>}
-        {!connected && provider.id === 'WHATSAPP' && (whatsappReady
-          ? <div className="mt-4"><WhatsAppConnectButton appId={process.env.META_APP_ID!} configId={process.env.META_WHATSAPP_CONFIG_ID!} graphVersion={getMetaGraphVersion()} /></div>
-          : <p className="mt-4 text-xs text-amber-700">سيظهر زر الربط بعد إكمال إعداد WhatsApp Embedded Signup.</p>)}
+        {provider.id === 'WHATSAPP' && (evolutionReady ? <EvolutionConnect initiallyConnected={connected} /> : <p className="mt-4 text-xs text-amber-700">سيظهر زر ربط QR بعد إكمال إعداد Evolution API.</p>)}
         {!channel && !isRemote && <form action={addLocalChannel} className="mt-4"><input type="hidden" name="provider" value={provider.id} /><button className="rounded-xl border border-slate-300 px-4 py-2 text-xs font-bold dark:border-slate-700">إنشاء إعداد القناة</button></form>}
         {channel && provider.id === 'EMAIL' && <form action={saveEmailConfiguration} className="mt-4 grid gap-2"><input type="hidden" name="channelId" value={channel.id} /><input name="host" placeholder={`SMTP host (${String(config.host || 'غير مضبوط')})`} className="rounded-lg border bg-transparent p-2 text-xs" /><div className="grid grid-cols-2 gap-2"><input name="port" type="number" placeholder={`Port (${String(config.port || 587)})`} className="rounded-lg border bg-transparent p-2 text-xs" /><input name="user" placeholder={`User (${String(config.user || 'غير مضبوط')})`} className="rounded-lg border bg-transparent p-2 text-xs" /></div><input name="pass" type="password" autoComplete="new-password" placeholder={`Password (${maskSecret(String(config.pass || ''))})`} className="rounded-lg border bg-transparent p-2 text-xs" /><input name="from" type="email" placeholder={`From (${String(config.from || 'غير مضبوط')})`} className="rounded-lg border bg-transparent p-2 text-xs" /><button className="rounded-lg border px-3 py-2 text-xs font-bold">حفظ مشفرًا</button></form>}
         {channel && provider.id === 'EMAIL' && <form action={testEmailConnection} className="mt-2"><input type="hidden" name="channelId" value={channel.id} /><button className="rounded-lg bg-slate-900 px-3 py-2 text-xs font-bold text-white dark:bg-white dark:text-slate-900">فحص الاتصال</button></form>}
