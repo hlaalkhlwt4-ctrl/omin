@@ -34,6 +34,51 @@ function phoneFromJid(jid: string) {
   return jid.endsWith('@s.whatsapp.net') ? jid.split('@')[0].replace(/\D/g, '') || null : null;
 }
 
+export async function persistEvolutionContact(input: {
+  workspaceId: string;
+  channelId: string;
+  contact: Record<string, unknown>;
+  createConversation?: boolean;
+}) {
+  const rawId = String(input.contact.remoteJid || input.contact.id || input.contact.number || '');
+  if (!rawId || rawId.endsWith('@broadcast')) return false;
+  const handleId = rawId.includes('@') ? rawId : `${rawId.replace(/\D/g, '')}@s.whatsapp.net`;
+  if (!handleId.replace(/\D/g, '')) return false;
+  const phone = phoneFromJid(handleId);
+  const fullName = String(input.contact.pushName || input.contact.name || input.contact.subject || phone || handleId);
+  const avatarUrl = typeof input.contact.profilePictureUrl === 'string' ? input.contact.profilePictureUrl : null;
+  let contactChannel = await db.contactChannel.findFirst({
+    where: { provider: 'WHATSAPP', handleId, contact: { workspaceId: input.workspaceId } },
+    include: { contact: true },
+  });
+  let created = false;
+  if (!contactChannel) {
+    const contact = await db.contact.create({
+      data: {
+        workspaceId: input.workspaceId,
+        fullName,
+        phone,
+        avatarUrl,
+        source: 'WHATSAPP',
+        channels: { create: { provider: 'WHATSAPP', handleId, optInStatus: true } },
+      },
+      include: { channels: true },
+    });
+    contactChannel = { ...contact.channels[0], contact };
+    created = true;
+  } else if (fullName !== handleId || avatarUrl) {
+    await db.contact.update({ where: { id: contactChannel.contactId }, data: { fullName, phone, avatarUrl } });
+  }
+  if (input.createConversation) {
+    const conversation = await db.conversation.findFirst({
+      where: { workspaceId: input.workspaceId, channelId: input.channelId, contactId: contactChannel.contactId, status: { not: 'CLOSED' } },
+      select: { id: true },
+    });
+    if (!conversation) await db.conversation.create({ data: { workspaceId: input.workspaceId, channelId: input.channelId, contactId: contactChannel.contactId } });
+  }
+  return created;
+}
+
 function messageDate(value: EvolutionMessage['messageTimestamp']) {
   const timestamp = Number(value || 0);
   if (!Number.isFinite(timestamp) || timestamp <= 0) return new Date();

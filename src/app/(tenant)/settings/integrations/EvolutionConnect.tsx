@@ -1,7 +1,7 @@
 'use client';
 
 import Image from 'next/image';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 
 type Status = { configured?: boolean; state?: string; connected?: boolean };
@@ -19,6 +19,7 @@ export function EvolutionConnect({ initiallyConnected }: { initiallyConnected: b
   const [qrCode, setQrCode] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState('');
+  const automaticSyncStarted = useRef(false);
 
   const refreshStatus = useCallback(async () => {
     const response = await fetch('/api/integrations/evolution/status', { cache: 'no-store' });
@@ -27,6 +28,20 @@ export function EvolutionConnect({ initiallyConnected }: { initiallyConnected: b
     if (body.connected) {
       setConnected(true);
       setQrCode(null);
+      if (!automaticSyncStarted.current) {
+        automaticSyncStarted.current = true;
+        setPending(true);
+        try {
+          const syncResponse = await fetch('/api/integrations/evolution/sync', { method: 'POST' });
+          const syncBody = await readJson<{ message?: string; error?: string }>(syncResponse);
+          if (!syncResponse.ok) setError(syncBody.error || 'تعذرت المزامنة التلقائية.');
+          else setError(syncBody.message || 'اكتملت مزامنة واتساب تلقائيًا.');
+        } catch (cause) {
+          setError(cause instanceof Error ? cause.message : 'تعذرت المزامنة التلقائية.');
+        } finally {
+          setPending(false);
+        }
+      }
       router.refresh();
     }
   }, [router]);
