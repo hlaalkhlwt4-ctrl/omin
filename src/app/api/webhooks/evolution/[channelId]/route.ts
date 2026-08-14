@@ -1,6 +1,7 @@
 import { timingSafeEqual } from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
+import { evolutionMessagesFromPayload, persistEvolutionMessage } from '@/lib/evolution-sync';
 
 function validSecret(received: string) {
   const expected = process.env.EVOLUTION_WEBHOOK_SECRET || '';
@@ -20,6 +21,11 @@ export async function POST(request: NextRequest, context: { params: Promise<{ ch
   if (event === 'CONNECTION_UPDATE') {
     const state = String(payload.data?.state || '');
     await db.channel.update({ where: { id: channel.id }, data: { healthStatus: state === 'open' ? 'CONNECTED' : 'DISCONNECTED', isActive: state === 'open' } });
+  }
+  if (['MESSAGES_UPSERT', 'SEND_MESSAGE', 'MESSAGES_SET'].includes(event)) {
+    for (const message of evolutionMessagesFromPayload(payload).slice(0, 1000)) {
+      await persistEvolutionMessage({ workspaceId: channel.workspaceId, channelId: channel.id, message, rawPayload: payload });
+    }
   }
   return NextResponse.json({ received: true });
 }

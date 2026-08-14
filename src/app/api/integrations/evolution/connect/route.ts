@@ -25,7 +25,7 @@ export async function POST() {
       instanceName,
       integration: 'WHATSAPP-BAILEYS',
       qrcode: true,
-      webhook: { enabled: true, url: webhookUrl, webhookByEvents: false, webhook_by_events: false, events: ['QRCODE_UPDATED', 'CONNECTION_UPDATE', 'MESSAGES_UPSERT', 'MESSAGES_UPDATE', 'SEND_MESSAGE'] },
+      webhook: { enabled: true, url: webhookUrl, webhookByEvents: false, webhook_by_events: false, events: ['QRCODE_UPDATED', 'CONNECTION_UPDATE', 'MESSAGES_SET', 'MESSAGES_UPSERT', 'MESSAGES_UPDATE', 'SEND_MESSAGE'] },
     }),
     });
     let payload = await response.json().catch(() => ({})) as EvolutionPayload & { message?: string | string[] };

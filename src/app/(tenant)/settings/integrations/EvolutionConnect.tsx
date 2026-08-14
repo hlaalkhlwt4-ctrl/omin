@@ -71,7 +71,23 @@ export function EvolutionConnect({ initiallyConnected }: { initiallyConnected: b
     }
   }
 
-  if (connected) return <div className="mt-4"><p className="rounded-xl bg-emerald-50 p-3 text-xs font-bold text-emerald-800">رقم واتساب متصل عبر Evolution API</p><button type="button" onClick={disconnect} disabled={pending} className="mt-3 text-xs font-bold text-rose-600 disabled:opacity-50">{pending ? 'جارٍ الفصل…' : 'فصل الرقم'}</button>{error && <p className="mt-2 text-xs text-rose-600">{error}</p>}</div>;
+  async function sync() {
+    setPending(true);
+    setError('');
+    try {
+      const response = await fetch('/api/integrations/evolution/sync', { method: 'POST' });
+      const body = await readJson<{ imported?: number; message?: string; error?: string }>(response);
+      if (!response.ok) throw new Error(body.error || 'تعذرت مزامنة واتساب.');
+      setError(body.message || `تم استيراد ${body.imported || 0} رسالة.`);
+      router.refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'تعذرت مزامنة واتساب.');
+    } finally {
+      setPending(false);
+    }
+  }
+
+  if (connected) return <div className="mt-4"><p className="rounded-xl bg-emerald-50 p-3 text-xs font-bold text-emerald-800">رقم واتساب متصل عبر Evolution API</p><div className="mt-3 flex flex-wrap gap-3"><button type="button" onClick={sync} disabled={pending} className="rounded-xl bg-emerald-600 px-4 py-2.5 text-xs font-bold text-white disabled:opacity-50">{pending ? 'جارٍ مزامنة واتساب…' : 'مزامنة المحادثات'}</button><button type="button" onClick={disconnect} disabled={pending} className="text-xs font-bold text-rose-600 disabled:opacity-50">فصل الرقم</button></div>{error && <p className="mt-2 text-xs text-slate-600" role="status">{error}</p>}</div>;
 
   return <div className="mt-4">
     {qrCode ? <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-center"><p className="mb-3 text-xs font-bold text-emerald-900">افتح واتساب ← الأجهزة المرتبطة ← ربط جهاز، ثم امسح الرمز</p><Image src={qrCode} alt="رمز QR لربط واتساب" width={240} height={240} unoptimized className="mx-auto rounded-xl bg-white p-2" /><p className="mt-3 text-[11px] text-emerald-800">سيتم تحديث حالة الاتصال تلقائيًا.</p></div> : null}

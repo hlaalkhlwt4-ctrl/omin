@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from 'crypto';
 import nodemailer from 'nodemailer';
+import { evolutionRequest } from '../evolution-api';
 
 export type ChannelProviderType = 'WHATSAPP' | 'INSTAGRAM' | 'FACEBOOK' | 'EMAIL' | 'DEV_MOCK';
 
@@ -80,6 +81,19 @@ export class WhatsAppCloudAdapter implements MessagingAdapter {
   provider: ChannelProviderType = 'WHATSAPP';
 
   async sendMessage(channelConfig: any, payload: OutboundMessagePayload): Promise<SendMessageResult> {
+    if (channelConfig.connectedVia === 'EVOLUTION_API' && channelConfig.instanceName) {
+      try {
+        const response = await evolutionRequest(`/message/sendText/${encodeURIComponent(channelConfig.instanceName)}`, {
+          method: 'POST',
+          body: JSON.stringify({ number: payload.recipientId.replace(/@.*$/, '').replace(/\D/g, ''), text: payload.body, textMessage: { text: payload.body } }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) return { success: false, error: data?.message || `Evolution API HTTP ${response.status}`, providerRawResponse: data };
+        return { success: true, messageId: data?.key?.id, providerRawResponse: data };
+      } catch (error) {
+        return { success: false, error: error instanceof Error ? error.message : 'Evolution API network error' };
+      }
+    }
     const accessToken = channelConfig.accessToken || process.env.WHATSAPP_ACCESS_TOKEN;
     const phoneId = channelConfig.phoneId || process.env.WHATSAPP_PHONE_NUMBER_ID;
 
