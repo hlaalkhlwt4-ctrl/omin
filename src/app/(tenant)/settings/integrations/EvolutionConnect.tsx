@@ -5,11 +5,34 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 
 type Status = { configured?: boolean; state?: string; connected?: boolean };
+type SyncResult = { imported?: number; contactsImported?: number; page?: number; totalPages?: number; nextPage?: number | null; message?: string; error?: string };
 
 async function readJson<T>(response: Response): Promise<T> {
   const text = await response.text();
   if (!text) throw new Error(`لم يُرجع الخادم أي تفاصيل (HTTP ${response.status}).`);
   try { return JSON.parse(text) as T; } catch { throw new Error(`استجابة الخادم غير صالحة (HTTP ${response.status}).`); }
+}
+
+async function synchronizeAll() {
+  let page = 1;
+  let imported = 0;
+  let contactsImported = 0;
+  let totalPages = 1;
+  for (let requestCount = 0; requestCount < 500; requestCount += 1) {
+    const response = await fetch('/api/integrations/evolution/sync', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ page }),
+    });
+    const body = await readJson<SyncResult>(response);
+    if (!response.ok) throw new Error(body.error || 'تعذرت مزامنة واتساب.');
+    imported += body.imported || 0;
+    contactsImported += body.contactsImported || 0;
+    totalPages = body.totalPages || totalPages;
+    if (!body.nextPage) return `اكتملت المزامنة: ${imported} رسالة جديدة و${contactsImported} جهة اتصال (${totalPages} صفحة).`;
+    page = body.nextPage;
+  }
+  throw new Error('عدد صفحات واتساب أكبر من الحد الآمن للمزامنة.');
 }
 
 export function EvolutionConnect({ initiallyConnected }: { initiallyConnected: boolean }) {
@@ -32,10 +55,7 @@ export function EvolutionConnect({ initiallyConnected }: { initiallyConnected: b
         automaticSyncStarted.current = true;
         setPending(true);
         try {
-          const syncResponse = await fetch('/api/integrations/evolution/sync', { method: 'POST' });
-          const syncBody = await readJson<{ message?: string; error?: string }>(syncResponse);
-          if (!syncResponse.ok) setError(syncBody.error || 'تعذرت المزامنة التلقائية.');
-          else setError(syncBody.message || 'اكتملت مزامنة واتساب تلقائيًا.');
+          setError(await synchronizeAll());
         } catch (cause) {
           setError(cause instanceof Error ? cause.message : 'تعذرت المزامنة التلقائية.');
         } finally {
@@ -90,10 +110,7 @@ export function EvolutionConnect({ initiallyConnected }: { initiallyConnected: b
     setPending(true);
     setError('');
     try {
-      const response = await fetch('/api/integrations/evolution/sync', { method: 'POST' });
-      const body = await readJson<{ imported?: number; message?: string; error?: string }>(response);
-      if (!response.ok) throw new Error(body.error || 'تعذرت مزامنة واتساب.');
-      setError(body.message || `تم استيراد ${body.imported || 0} رسالة.`);
+      setError(await synchronizeAll());
       router.refresh();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'تعذرت مزامنة واتساب.');
