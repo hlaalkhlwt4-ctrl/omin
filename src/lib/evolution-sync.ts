@@ -31,6 +31,37 @@ function usableJid(message: EvolutionMessage) {
   return jid;
 }
 
+async function normalizeEvolutionAliases(workspaceId: string, messages: EvolutionMessage[]) {
+  const pairs = new Map<string, string>();
+  for (const message of messages) {
+    const lid = String(message.key?.remoteJid || '');
+    const phoneJid = String(message.key?.remoteJidAlt || message.key?.senderPn || '');
+    if (lid.endsWith('@lid') && phoneJid.endsWith('@s.whatsapp.net')) pairs.set(lid, phoneJid);
+  }
+  if (!pairs.size) return;
+  const handles = [...new Set([...pairs.keys(), ...pairs.values()])];
+  const channels = await db.contactChannel.findMany({
+    where: { provider: 'WHATSAPP', handleId: { in: handles }, contact: { workspaceId } },
+    include: { contact: true },
+  });
+  const byHandle = new Map(channels.map((channel) => [channel.handleId, channel]));
+  for (const [lid, phoneJid] of pairs) {
+    const lidChannel = byHandle.get(lid);
+    const phoneChannel = byHandle.get(phoneJid);
+    if (!lidChannel || phoneChannel) continue;
+    const phone = phoneFromJid(phoneJid);
+    await db.$transaction([
+      db.contactChannel.update({ where: { id: lidChannel.id }, data: { handleId: phoneJid } }),
+      db.contact.update({
+        where: { id: lidChannel.contactId },
+        data: { phone, fullName: lidChannel.contact.fullName.includes('@lid') ? phone || lidChannel.contact.fullName : lidChannel.contact.fullName },
+      }),
+    ]);
+    byHandle.delete(lid);
+    byHandle.set(phoneJid, { ...lidChannel, handleId: phoneJid });
+  }
+}
+
 export async function refreshEvolutionConversationOrder(input: { workspaceId: string; channelId: string }) {
   const conversations = await db.conversation.findMany({
     where: { workspaceId: input.workspaceId, channelId: input.channelId },
@@ -189,6 +220,8 @@ export async function persistEvolutionMessage(input: {
   const idempotencyKey = evolutionMessageKey(channelId, message);
   if (await db.message.findUnique({ where: { idempotencyKey }, select: { id: true } })) return false;
 
+  await normalizeEvolutionAliases(workspaceId, [message]);
+
   let contactChannel = await db.contactChannel.findFirst({
     where: { provider: 'WHATSAPP', handleId: remoteJid, contact: { workspaceId } },
     include: { contact: true },
@@ -264,6 +297,7 @@ export async function persistEvolutionMessagesBatch(input: {
   const existingKeys = new Set(existing.map((item) => item.idempotencyKey));
   const pending = candidates.filter(([key]) => !existingKeys.has(key));
   if (!pending.length) return 0;
+  await normalizeEvolutionAliases(input.workspaceId, pending.map(([, message]) => message));
   const groups = new Map<string, Array<{ key: string; message: EvolutionMessage }>>();
   for (const [key, message] of pending) {
     const jid = usableJid(message);

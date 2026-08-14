@@ -84,12 +84,14 @@ export function InboxClientView({
   useEffect(() => {
     const refreshConversations = async () => {
       if (!navigator.onLine) return;
+      await fetch('/api/integrations/evolution/live-sync', { method: 'POST' }).catch(() => null);
       const response = await fetch('/api/inbox/conversations?limit=1000', { cache: 'no-store' });
       if (!response.ok) return;
       const data = await response.json();
       if (Array.isArray(data.conversations)) setConversations(data.conversations);
     };
-    const timer = window.setInterval(refreshConversations, 5000);
+    void refreshConversations();
+    const timer = window.setInterval(refreshConversations, 15000);
     return () => window.clearInterval(timer);
   }, []);
 
