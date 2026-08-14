@@ -29,8 +29,9 @@ export async function POST(request: Request) {
             enabled: true,
             url: webhookUrl,
             webhookByEvents: false,
+            webhook_by_events: false,
             webhookBase64: false,
-            events: ['CONNECTION_UPDATE', 'MESSAGES_UPSERT', 'MESSAGES_UPDATE', 'SEND_MESSAGE'],
+            events: ['CONNECTION_UPDATE', 'MESSAGES_SET', 'MESSAGES_UPSERT', 'MESSAGES_UPDATE', 'SEND_MESSAGE'],
           },
         }),
       });

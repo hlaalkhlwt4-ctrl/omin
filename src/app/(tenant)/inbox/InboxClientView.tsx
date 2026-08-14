@@ -59,6 +59,7 @@ export function InboxClientView({
   const [aiResultType, setAiResultType] = useState<'SUGGEST' | 'SUMMARY'>('SUGGEST');
   const [loadingAi, setLoadingAi] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const liveSyncRunningRef = useRef(false);
 
   const selectedConv = conversations.find((c) => c.id === selectedConvId);
   const contactLabel = (conversation: ConvItem) =>
@@ -82,16 +83,29 @@ export function InboxClientView({
   }, [selectedConvId]);
 
   useEffect(() => {
-    const refreshConversations = async () => {
+    const loadConversations = async () => {
       if (!navigator.onLine) return;
-      await fetch('/api/integrations/evolution/live-sync', { method: 'POST' }).catch(() => null);
       const response = await fetch('/api/inbox/conversations?limit=1000', { cache: 'no-store' });
       if (!response.ok) return;
       const data = await response.json();
       if (Array.isArray(data.conversations)) setConversations(data.conversations);
     };
-    void refreshConversations();
-    const timer = window.setInterval(refreshConversations, 15000);
+    const liveSync = async () => {
+      if (!navigator.onLine || liveSyncRunningRef.current) return;
+      liveSyncRunningRef.current = true;
+      try {
+        await fetch('/api/integrations/evolution/live-sync', { method: 'POST', signal: AbortSignal.timeout(25_000) });
+        await loadConversations();
+      } catch {
+        // The webhook remains the primary path; a polling timeout must never
+        // block the inbox UI.
+      } finally {
+        liveSyncRunningRef.current = false;
+      }
+    };
+    void loadConversations();
+    void liveSync();
+    const timer = window.setInterval(liveSync, 10000);
     return () => window.clearInterval(timer);
   }, []);
 
