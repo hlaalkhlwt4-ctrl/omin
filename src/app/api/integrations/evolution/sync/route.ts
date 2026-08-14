@@ -4,7 +4,7 @@ import { requireWritableWorkspaceContext } from '@/lib/auth';
 import { enforcePermission, type WorkspaceRole } from '@/lib/permissions';
 import { decryptIntegrationConfig } from '@/lib/integration-secrets';
 import { appUrl, evolutionRequest } from '@/lib/evolution-api';
-import { evolutionMessagesFromPayload, persistEvolutionContact, persistEvolutionMessage } from '@/lib/evolution-sync';
+import { evolutionMessagesFromPayload, persistEvolutionContact, persistEvolutionMessagesBatch } from '@/lib/evolution-sync';
 
 export const maxDuration = 60;
 
@@ -40,7 +40,7 @@ export async function POST(request: Request) {
     const [contactsResponse, chatsResponse, response] = await Promise.all([
       page === 1 ? evolutionRequest(`/chat/findContacts/${encodeURIComponent(instanceName)}`, { method: 'POST', body: JSON.stringify({ where: {}, take: 5000, skip: 0 }) }) : Promise.resolve(null),
       page === 1 ? evolutionRequest(`/chat/findChats/${encodeURIComponent(instanceName)}`, { method: 'POST', body: JSON.stringify({ where: {}, take: 5000, skip: 0 }) }) : Promise.resolve(null),
-      evolutionRequest(`/chat/findMessages/${encodeURIComponent(instanceName)}`, { method: 'POST', body: JSON.stringify({ where: {}, page, offset: 250 }) }),
+      evolutionRequest(`/chat/findMessages/${encodeURIComponent(instanceName)}`, { method: 'POST', body: JSON.stringify({ where: {}, page, offset: 1000 }) }),
     ]);
     if (!response.ok) return NextResponse.json({ error: `تعذر جلب سجل الرسائل (HTTP ${response.status}).` }, { status: 502 });
     const contactsPayload = contactsResponse?.ok ? await contactsResponse.json().catch(() => []) : [];
@@ -48,19 +48,21 @@ export async function POST(request: Request) {
     const contacts = Array.isArray(contactsPayload) ? contactsPayload : Array.isArray(contactsPayload?.data) ? contactsPayload.data : [];
     const chats = Array.isArray(chatsPayload) ? chatsPayload : Array.isArray(chatsPayload?.data) ? chatsPayload.data : [];
     let contactsImported = 0;
-    for (const contact of contacts.slice(0, 5000)) {
-      if (await persistEvolutionContact({ workspaceId, channelId: channel.id, contact })) contactsImported += 1;
+    for (let index = 0; index < contacts.length; index += 25) {
+      const results = await Promise.all(contacts.slice(index, index + 25).map((contact: Record<string, unknown>) =>
+        persistEvolutionContact({ workspaceId, channelId: channel.id, contact }),
+      ));
+      contactsImported += results.filter(Boolean).length;
     }
-    for (const chat of chats.slice(0, 5000)) {
-      await persistEvolutionContact({ workspaceId, channelId: channel.id, contact: chat, createConversation: true });
+    for (let index = 0; index < chats.length; index += 25) {
+      await Promise.all(chats.slice(index, index + 25).map((chat: Record<string, unknown>) =>
+        persistEvolutionContact({ workspaceId, channelId: channel.id, contact: chat, createConversation: true }),
+      ));
     }
     const payload = await response.json().catch(() => ({}));
     const envelope = payload?.messages || payload?.data?.messages || payload;
     const totalPages = Math.max(page, Number(envelope?.pages || 1));
-    let imported = 0;
-    for (const message of evolutionMessagesFromPayload(payload).slice(0, 1000)) {
-      if (await persistEvolutionMessage({ workspaceId, channelId: channel.id, message, rawPayload: message })) imported += 1;
-    }
+    const imported = await persistEvolutionMessagesBatch({ workspaceId, channelId: channel.id, messages: evolutionMessagesFromPayload(payload) });
     await db.channel.update({ where: { id: channel.id }, data: { isActive: true, healthStatus: 'CONNECTED' } });
     return NextResponse.json({
       imported,
