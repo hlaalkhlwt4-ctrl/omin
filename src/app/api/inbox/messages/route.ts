@@ -21,7 +21,7 @@ export async function GET(req: NextRequest) {
 
     const rows = await db.message.findMany({
       where: { conversationId },
-      orderBy: { createdAt: 'desc' },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: limit + 1,
       ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
     });

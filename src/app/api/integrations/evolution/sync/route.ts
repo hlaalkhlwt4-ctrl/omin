@@ -4,7 +4,7 @@ import { requireWritableWorkspaceContext } from '@/lib/auth';
 import { enforcePermission, type WorkspaceRole } from '@/lib/permissions';
 import { decryptIntegrationConfig } from '@/lib/integration-secrets';
 import { appUrl, evolutionRequest } from '@/lib/evolution-api';
-import { evolutionMessagesFromPayload, persistEvolutionContactsBatch, persistEvolutionMessagesBatch } from '@/lib/evolution-sync';
+import { evolutionMessagesFromPayload, persistEvolutionContactsBatch, persistEvolutionMessagesBatch, refreshEvolutionConversationOrder } from '@/lib/evolution-sync';
 
 export const maxDuration = 60;
 
@@ -54,6 +54,9 @@ export async function POST(request: Request) {
     const envelope = payload?.messages || payload?.data?.messages || payload;
     const totalPages = Math.max(page, Number(envelope?.pages || 1));
     const imported = await persistEvolutionMessagesBatch({ workspaceId, channelId: channel.id, messages: evolutionMessagesFromPayload(payload), updateConversationSummaries: false });
+    const conversationsOrdered = page >= totalPages
+      ? await refreshEvolutionConversationOrder({ workspaceId, channelId: channel.id })
+      : 0;
     await db.channel.update({ where: { id: channel.id }, data: { isActive: true, healthStatus: 'CONNECTED' } });
     return NextResponse.json({
       imported,
@@ -61,6 +64,7 @@ export async function POST(request: Request) {
       page,
       totalPages,
       nextPage: page < totalPages ? page + 1 : null,
+      conversationsOrdered,
       message: `تمت مزامنة الصفحة ${page} من ${totalPages}.`,
     });
   } catch (error) {

@@ -12,9 +12,9 @@ export default async function InboxPage() {
     include: {
       contact: true,
       channel: true,
-      messages: { orderBy: { createdAt: 'desc' }, take: 1 },
+      messages: { orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 1 },
     },
-    orderBy: { lastMessageAt: 'desc' },
+    orderBy: [{ lastMessageAt: 'desc' }, { id: 'desc' }],
   });
 
   const savedReplies = await db.savedReply.findMany({
@@ -24,6 +24,12 @@ export default async function InboxPage() {
   const teamMembers = await db.workspaceMember.findMany({
     where: { workspaceId, status: 'ACTIVE' },
     include: { user: { select: { id: true, fullName: true } } },
+  });
+
+  conversations.sort((left, right) => {
+    const leftTime = left.messages[0]?.createdAt?.getTime() || left.lastMessageAt.getTime();
+    const rightTime = right.messages[0]?.createdAt?.getTime() || right.lastMessageAt.getTime();
+    return rightTime - leftTime;
   });
 
   return (

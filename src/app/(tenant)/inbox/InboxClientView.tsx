@@ -61,6 +61,10 @@ export function InboxClientView({
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const selectedConv = conversations.find((c) => c.id === selectedConvId);
+  const contactLabel = (conversation: ConvItem) =>
+    conversation.channel.provider === 'WHATSAPP'
+      ? conversation.contact.phone || (conversation.contact.fullName.includes('@lid') ? 'رقم واتساب غير متاح' : conversation.contact.fullName)
+      : conversation.contact.fullName;
 
   // Load messages for selected conversation
   useEffect(() => {
@@ -76,6 +80,18 @@ export function InboxClientView({
       })
       .catch(() => setLoadingMessages(false));
   }, [selectedConvId]);
+
+  useEffect(() => {
+    const refreshConversations = async () => {
+      if (!navigator.onLine) return;
+      const response = await fetch('/api/inbox/conversations?limit=1000', { cache: 'no-store' });
+      if (!response.ok) return;
+      const data = await response.json();
+      if (Array.isArray(data.conversations)) setConversations(data.conversations);
+    };
+    const timer = window.setInterval(refreshConversations, 5000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     setOnline(navigator.onLine);
@@ -166,7 +182,7 @@ export function InboxClientView({
 
   const filteredConversations = conversations.filter((c) => {
     const matchesSearch =
-      c.contact.fullName.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      contactLabel(c).toLowerCase().includes(searchTerm.toLowerCase()) ||
       (c.contact.phone && c.contact.phone.includes(searchTerm));
     const matchesStatus = statusFilter === 'ALL' || c.status === statusFilter;
     return matchesSearch && matchesStatus;
@@ -234,7 +250,7 @@ export function InboxClientView({
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center justify-between">
                       <span className="font-bold text-xs text-slate-900 dark:text-white truncate">
-                        {conv.contact.fullName}
+                        {contactLabel(conv)}
                       </span>
                       <span className="text-[10px] text-slate-400 shrink-0">
                         {new Date(conv.lastMessageAt).toLocaleTimeString('ar-SA', { hour: '2-digit', minute: '2-digit' })}
@@ -266,7 +282,7 @@ export function InboxClientView({
             <div className="p-3 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between bg-white dark:bg-slate-900">
               <div>
                 <h3 className="font-bold text-sm text-slate-900 dark:text-white">
-                  {selectedConv.contact.fullName}
+                  {contactLabel(selectedConv)}
                 </h3>
                 <span className="text-[10px] text-slate-500">
                   {selectedConv.contact.phone || selectedConv.contact.email} · {getProviderBadge(selectedConv.channel.provider).label}
@@ -436,11 +452,11 @@ export function InboxClientView({
           <div className="bg-white dark:bg-slate-900 p-4 rounded-xl border border-slate-200 dark:border-slate-800 space-y-3">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-full bg-brand-600 text-white font-bold flex items-center justify-center">
-                {selectedConv.contact.fullName.substring(0, 1)}
+                  {contactLabel(selectedConv).substring(0, 1)}
               </div>
               <div>
                 <span className="font-bold text-sm text-slate-900 dark:text-white block">
-                  {selectedConv.contact.fullName}
+                  {contactLabel(selectedConv)}
                 </span>
                 <span className="text-[10px] text-brand-600 font-bold">{selectedConv.contact.stage}</span>
               </div>

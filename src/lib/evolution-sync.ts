@@ -2,7 +2,7 @@ import { randomUUID } from 'crypto';
 import { db } from './db';
 
 type EvolutionMessage = {
-  key?: { id?: string; remoteJid?: string; remoteJidAlt?: string; fromMe?: boolean };
+  key?: { id?: string; remoteJid?: string; remoteJidAlt?: string; senderPn?: string; fromMe?: boolean };
   pushName?: string | null;
   message?: Record<string, unknown>;
   messageType?: string;
@@ -26,9 +26,30 @@ function messageText(message: Record<string, unknown> | undefined) {
 
 function usableJid(message: EvolutionMessage) {
   const jid = String(message.key?.remoteJid || '');
-  const alternative = String(message.key?.remoteJidAlt || '');
+  const alternative = String(message.key?.remoteJidAlt || message.key?.senderPn || '');
   if (jid.endsWith('@lid') && alternative.endsWith('@s.whatsapp.net')) return alternative;
   return jid;
+}
+
+export async function refreshEvolutionConversationOrder(input: { workspaceId: string; channelId: string }) {
+  const conversations = await db.conversation.findMany({
+    where: { workspaceId: input.workspaceId, channelId: input.channelId },
+    select: { id: true },
+  });
+  const ids = conversations.map((conversation) => conversation.id);
+  if (!ids.length) return 0;
+  const summaries = await db.message.groupBy({
+    by: ['conversationId'],
+    where: { conversationId: { in: ids } },
+    _max: { createdAt: true },
+  });
+  for (let index = 0; index < summaries.length; index += 50) {
+    await db.$transaction(summaries.slice(index, index + 50).map((summary) => db.conversation.update({
+      where: { id: summary.conversationId },
+      data: { lastMessageAt: summary._max.createdAt || new Date(0) },
+    })));
+  }
+  return summaries.length;
 }
 
 function evolutionMessageKey(channelId: string, message: EvolutionMessage) {
@@ -40,7 +61,9 @@ function phoneFromJid(jid: string) {
 }
 
 function evolutionContactData(contact: Record<string, unknown>) {
-  const rawId = String(contact.remoteJid || contact.id || contact.number || '');
+  const primaryId = String(contact.remoteJid || contact.id || '');
+  const alternativeId = String(contact.remoteJidAlt || contact.senderPn || contact.phoneNumber || contact.phone_number || contact.number || '');
+  const rawId = primaryId.endsWith('@lid') && alternativeId ? alternativeId : primaryId || alternativeId;
   if (!rawId || rawId.endsWith('@broadcast')) return null;
   const handleId = rawId.includes('@') ? rawId : `${rawId.replace(/\D/g, '')}@s.whatsapp.net`;
   if (!handleId.replace(/\D/g, '')) return null;
@@ -106,7 +129,9 @@ export async function persistEvolutionContact(input: {
   contact: Record<string, unknown>;
   createConversation?: boolean;
 }) {
-  const rawId = String(input.contact.remoteJid || input.contact.id || input.contact.number || '');
+  const primaryId = String(input.contact.remoteJid || input.contact.id || '');
+  const alternativeId = String(input.contact.remoteJidAlt || input.contact.senderPn || input.contact.phoneNumber || input.contact.phone_number || input.contact.number || '');
+  const rawId = primaryId.endsWith('@lid') && alternativeId ? alternativeId : primaryId || alternativeId;
   if (!rawId || rawId.endsWith('@broadcast')) return false;
   const handleId = rawId.includes('@') ? rawId : `${rawId.replace(/\D/g, '')}@s.whatsapp.net`;
   if (!handleId.replace(/\D/g, '')) return false;
