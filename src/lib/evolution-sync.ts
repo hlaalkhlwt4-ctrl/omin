@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import { db } from './db';
 
 type EvolutionMessage = {
@@ -30,8 +31,73 @@ function usableJid(message: EvolutionMessage) {
   return jid;
 }
 
+function evolutionMessageKey(channelId: string, message: EvolutionMessage) {
+  return `evolution:${channelId}:${usableJid(message)}:${message.key?.fromMe ? 'out' : 'in'}:${message.key?.id}`;
+}
+
 function phoneFromJid(jid: string) {
   return jid.endsWith('@s.whatsapp.net') ? jid.split('@')[0].replace(/\D/g, '') || null : null;
+}
+
+function evolutionContactData(contact: Record<string, unknown>) {
+  const rawId = String(contact.remoteJid || contact.id || contact.number || '');
+  if (!rawId || rawId.endsWith('@broadcast')) return null;
+  const handleId = rawId.includes('@') ? rawId : `${rawId.replace(/\D/g, '')}@s.whatsapp.net`;
+  if (!handleId.replace(/\D/g, '')) return null;
+  const phone = phoneFromJid(handleId);
+  return {
+    handleId,
+    phone,
+    fullName: String(contact.pushName || contact.name || contact.subject || phone || handleId),
+    avatarUrl: typeof contact.profilePictureUrl === 'string' ? contact.profilePictureUrl : null,
+  };
+}
+
+export async function persistEvolutionContactsBatch(input: {
+  workspaceId: string;
+  channelId: string;
+  contacts: Record<string, unknown>[];
+  createConversations?: boolean;
+}) {
+  const normalized = new Map<string, NonNullable<ReturnType<typeof evolutionContactData>>>();
+  for (const contact of input.contacts) {
+    const item = evolutionContactData(contact);
+    if (item) normalized.set(item.handleId, item);
+  }
+  const handles = [...normalized.keys()];
+  if (!handles.length) return { contactsCreated: 0, conversationsCreated: 0, contactIds: new Map<string, string>() };
+  const existing = await db.contactChannel.findMany({
+    where: { provider: 'WHATSAPP', handleId: { in: handles }, contact: { workspaceId: input.workspaceId } },
+    select: { handleId: true, contactId: true },
+  });
+  const contactIds = new Map(existing.map((item) => [item.handleId, item.contactId]));
+  const newItems = handles.filter((handle) => !contactIds.has(handle)).map((handle) => ({ id: randomUUID(), ...normalized.get(handle)! }));
+  if (newItems.length) {
+    await db.contact.createMany({ data: newItems.map((item) => ({
+      id: item.id, workspaceId: input.workspaceId, fullName: item.fullName, phone: item.phone, avatarUrl: item.avatarUrl, source: 'WHATSAPP',
+    })) });
+    await db.contactChannel.createMany({ data: newItems.map((item) => ({
+      id: randomUUID(), contactId: item.id, provider: 'WHATSAPP', handleId: item.handleId, optInStatus: true,
+    })) });
+    for (const item of newItems) contactIds.set(item.handleId, item.id);
+  }
+  let conversationsCreated = 0;
+  if (input.createConversations) {
+    const ids = [...contactIds.values()];
+    const existingConversations = await db.conversation.findMany({
+      where: { workspaceId: input.workspaceId, channelId: input.channelId, contactId: { in: ids }, status: { not: 'CLOSED' } },
+      select: { contactId: true },
+    });
+    const existingIds = new Set(existingConversations.map((item) => item.contactId));
+    const missingIds = ids.filter((id) => !existingIds.has(id));
+    if (missingIds.length) {
+      const result = await db.conversation.createMany({ data: missingIds.map((contactId) => ({
+        id: randomUUID(), workspaceId: input.workspaceId, channelId: input.channelId, contactId,
+      })) });
+      conversationsCreated = result.count;
+    }
+  }
+  return { contactsCreated: newItems.length, conversationsCreated, contactIds };
 }
 
 export async function persistEvolutionContact(input: {
@@ -95,7 +161,7 @@ export async function persistEvolutionMessage(input: {
   const remoteJid = usableJid(message);
   const providerId = String(message.key?.id || '');
   if (!remoteJid || !providerId || remoteJid.endsWith('@broadcast')) return false;
-  const idempotencyKey = `evolution:${channelId}:${providerId}`;
+  const idempotencyKey = evolutionMessageKey(channelId, message);
   if (await db.message.findUnique({ where: { idempotencyKey }, select: { id: true } })) return false;
 
   let contactChannel = await db.contactChannel.findFirst({
@@ -159,63 +225,68 @@ export async function persistEvolutionMessagesBatch(input: {
   workspaceId: string;
   channelId: string;
   messages: EvolutionMessage[];
+  updateConversationSummaries?: boolean;
 }) {
-  const candidates = input.messages.filter((message) => usableJid(message) && message.key?.id && !usableJid(message).endsWith('@broadcast'));
-  const keys = candidates.map((message) => `evolution:${input.channelId}:${message.key!.id}`);
+  const unique = new Map<string, EvolutionMessage>();
+  for (const message of input.messages) {
+    const jid = usableJid(message);
+    if (!jid || !message.key?.id || jid.endsWith('@broadcast')) continue;
+    unique.set(evolutionMessageKey(input.channelId, message), message);
+  }
+  const candidates = [...unique.entries()];
+  const keys = candidates.map(([key]) => key);
   const existing = await db.message.findMany({ where: { idempotencyKey: { in: keys } }, select: { idempotencyKey: true } });
   const existingKeys = new Set(existing.map((item) => item.idempotencyKey));
-  const groups = new Map<string, EvolutionMessage[]>();
-  for (const message of candidates) {
-    const key = `evolution:${input.channelId}:${message.key!.id}`;
-    if (existingKeys.has(key)) continue;
+  const pending = candidates.filter(([key]) => !existingKeys.has(key));
+  if (!pending.length) return 0;
+  const groups = new Map<string, Array<{ key: string; message: EvolutionMessage }>>();
+  for (const [key, message] of pending) {
     const jid = usableJid(message);
-    groups.set(jid, [...(groups.get(jid) || []), message]);
+    groups.set(jid, [...(groups.get(jid) || []), { key, message }]);
   }
-
-  let imported = 0;
-  const entries = [...groups.entries()];
-  for (let index = 0; index < entries.length; index += 10) {
-    const counts = await Promise.all(entries.slice(index, index + 10).map(async ([remoteJid, messages]) => {
-      await persistEvolutionContact({
-        workspaceId: input.workspaceId,
-        channelId: input.channelId,
-        contact: { id: remoteJid, pushName: messages.find((item) => item.pushName)?.pushName },
-      });
-      const contactChannel = await db.contactChannel.findFirstOrThrow({
-        where: { provider: 'WHATSAPP', handleId: remoteJid, contact: { workspaceId: input.workspaceId } },
-      });
-      let conversation = await db.conversation.findFirst({
-        where: { workspaceId: input.workspaceId, channelId: input.channelId, contactId: contactChannel.contactId, status: { not: 'CLOSED' } },
-        orderBy: { lastMessageAt: 'desc' },
-      });
-      const latestAt = messages.reduce((latest, message) => {
-        const date = messageDate(message.messageTimestamp);
-        return date > latest ? date : latest;
-      }, new Date(0));
-      conversation ||= await db.conversation.create({
-        data: { workspaceId: input.workspaceId, channelId: input.channelId, contactId: contactChannel.contactId, lastMessageAt: latestAt },
-      });
-      const result = await db.message.createMany({
-        data: messages.map((message) => ({
-          conversationId: conversation.id,
-          senderType: message.key?.fromMe ? 'USER' : 'CONTACT',
-          channel: 'WHATSAPP',
-          body: messageText(message.message),
-          rawPayload: JSON.stringify(message),
-          idempotencyKey: `evolution:${input.channelId}:${message.key!.id}`,
-          createdAt: messageDate(message.messageTimestamp),
-        })),
-      });
-      const unread = messages.filter((message) => !message.key?.fromMe).length;
-      await db.conversation.update({
-        where: { id: conversation.id },
-        data: { lastMessageAt: latestAt, ...(unread ? { unreadCount: { increment: unread } } : {}) },
-      });
-      return result.count;
-    }));
-    imported += counts.reduce((total, count) => total + count, 0);
+  const contacts = await persistEvolutionContactsBatch({
+    workspaceId: input.workspaceId,
+    channelId: input.channelId,
+    contacts: [...groups.entries()].map(([id, messages]) => ({ id, pushName: messages.find((item) => item.message.pushName)?.message.pushName })),
+  });
+  const contactIds = [...contacts.contactIds.values()];
+  const existingConversations = await db.conversation.findMany({
+    where: { workspaceId: input.workspaceId, channelId: input.channelId, contactId: { in: contactIds }, status: { not: 'CLOSED' } },
+    select: { id: true, contactId: true },
+  });
+  const conversationIds = new Map(existingConversations.map((item) => [item.contactId, item.id]));
+  const missingContactIds = contactIds.filter((id) => !conversationIds.has(id));
+  if (missingContactIds.length) {
+    const rows = missingContactIds.map((contactId) => ({ id: randomUUID(), workspaceId: input.workspaceId, channelId: input.channelId, contactId }));
+    await db.conversation.createMany({ data: rows });
+    for (const row of rows) conversationIds.set(row.contactId, row.id);
   }
-  return imported;
+  const messageRows = pending.map(([key, message]) => {
+    const contactId = contacts.contactIds.get(usableJid(message))!;
+    return {
+      conversationId: conversationIds.get(contactId)!,
+      senderType: message.key?.fromMe ? 'USER' : 'CONTACT',
+      channel: 'WHATSAPP',
+      body: messageText(message.message),
+      rawPayload: JSON.stringify(message),
+      idempotencyKey: key,
+      createdAt: messageDate(message.messageTimestamp),
+    };
+  });
+  const result = await db.message.createMany({ data: messageRows });
+  const summaries = new Map<string, { latestAt: Date; unread: number }>();
+  for (const row of messageRows) {
+    const current = summaries.get(row.conversationId) || { latestAt: new Date(0), unread: 0 };
+    if (row.createdAt > current.latestAt) current.latestAt = row.createdAt;
+    if (row.senderType === 'CONTACT') current.unread += 1;
+    summaries.set(row.conversationId, current);
+  }
+  if (input.updateConversationSummaries !== false) {
+    await db.$transaction([...summaries.entries()].map(([id, summary]) => db.conversation.update({
+      where: { id }, data: { lastMessageAt: summary.latestAt, ...(summary.unread ? { unreadCount: { increment: summary.unread } } : {}) },
+    })));
+  }
+  return result.count;
 }
 
 export function evolutionMessagesFromPayload(payload: unknown): EvolutionMessage[] {

@@ -4,7 +4,7 @@ import { requireWritableWorkspaceContext } from '@/lib/auth';
 import { enforcePermission, type WorkspaceRole } from '@/lib/permissions';
 import { decryptIntegrationConfig } from '@/lib/integration-secrets';
 import { appUrl, evolutionRequest } from '@/lib/evolution-api';
-import { evolutionMessagesFromPayload, persistEvolutionContact, persistEvolutionMessagesBatch } from '@/lib/evolution-sync';
+import { evolutionMessagesFromPayload, persistEvolutionContactsBatch, persistEvolutionMessagesBatch } from '@/lib/evolution-sync';
 
 export const maxDuration = 60;
 
@@ -47,22 +47,13 @@ export async function POST(request: Request) {
     const chatsPayload = chatsResponse?.ok ? await chatsResponse.json().catch(() => []) : [];
     const contacts = Array.isArray(contactsPayload) ? contactsPayload : Array.isArray(contactsPayload?.data) ? contactsPayload.data : [];
     const chats = Array.isArray(chatsPayload) ? chatsPayload : Array.isArray(chatsPayload?.data) ? chatsPayload.data : [];
-    let contactsImported = 0;
-    for (let index = 0; index < contacts.length; index += 25) {
-      const results = await Promise.all(contacts.slice(index, index + 25).map((contact: Record<string, unknown>) =>
-        persistEvolutionContact({ workspaceId, channelId: channel.id, contact }),
-      ));
-      contactsImported += results.filter(Boolean).length;
-    }
-    for (let index = 0; index < chats.length; index += 25) {
-      await Promise.all(chats.slice(index, index + 25).map((chat: Record<string, unknown>) =>
-        persistEvolutionContact({ workspaceId, channelId: channel.id, contact: chat, createConversation: true }),
-      ));
-    }
+    const contactResult = await persistEvolutionContactsBatch({ workspaceId, channelId: channel.id, contacts });
+    const chatResult = await persistEvolutionContactsBatch({ workspaceId, channelId: channel.id, contacts: chats, createConversations: true });
+    const contactsImported = contactResult.contactsCreated + chatResult.contactsCreated;
     const payload = await response.json().catch(() => ({}));
     const envelope = payload?.messages || payload?.data?.messages || payload;
     const totalPages = Math.max(page, Number(envelope?.pages || 1));
-    const imported = await persistEvolutionMessagesBatch({ workspaceId, channelId: channel.id, messages: evolutionMessagesFromPayload(payload) });
+    const imported = await persistEvolutionMessagesBatch({ workspaceId, channelId: channel.id, messages: evolutionMessagesFromPayload(payload), updateConversationSummaries: false });
     await db.channel.update({ where: { id: channel.id }, data: { isActive: true, healthStatus: 'CONNECTED' } });
     return NextResponse.json({
       imported,
