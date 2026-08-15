@@ -12,11 +12,26 @@ export async function POST() {
   try {
     const { workspaceId, role } = await requireWorkspaceContext();
     enforcePermission(role as WorkspaceRole, 'inbox:view');
-    const channel = await db.channel.findFirst({ where: { workspaceId, provider: 'WHATSAPP', isActive: true } });
+    const channel = await db.channel.findFirst({ where: { workspaceId, provider: 'WHATSAPP' } });
     if (!channel) return NextResponse.json({ imported: 0 });
     const config = decryptIntegrationConfig(channel.settingsJson);
     const instanceName = String(config.instanceName || '');
     if (!instanceName) return NextResponse.json({ imported: 0 });
+
+    const stateResponse = await evolutionRequest(`/instance/connectionState/${encodeURIComponent(instanceName)}`, {
+      signal: AbortSignal.timeout(8_000),
+    });
+    const statePayload = stateResponse.ok ? await stateResponse.json().catch(() => ({})) : {};
+    const state = String(statePayload?.instance?.state || statePayload?.state || 'close').toLowerCase();
+    if (!stateResponse.ok || state !== 'open') {
+      if (channel.isActive || channel.healthStatus !== 'DISCONNECTED') {
+        await db.channel.update({ where: { id: channel.id }, data: { isActive: false, healthStatus: 'DISCONNECTED' } });
+      }
+      return NextResponse.json({ imported: 0, connected: false, state }, { status: 409 });
+    }
+    if (!channel.isActive || channel.healthStatus !== 'CONNECTED') {
+      await db.channel.update({ where: { id: channel.id }, data: { isActive: true, healthStatus: 'CONNECTED' } });
+    }
 
     // Re-assert the webhook on every live-sync cycle. Evolution can lose its
     // webhook after an instance restart/reconnect.
@@ -55,7 +70,7 @@ export async function POST() {
       if (response?.ok) messages = messages.concat(evolutionMessagesFromPayload(await response.json().catch(() => ({}))));
     }
     const imported = await persistEvolutionMessagesBatch({ workspaceId, channelId: channel.id, messages });
-    return NextResponse.json({ imported });
+    return NextResponse.json({ imported, connected: true, state: 'open' });
   } catch (error) {
     console.error('Evolution live sync failed', error);
     return NextResponse.json({ error: 'تعذرت المزامنة الحية.' }, { status: 500 });

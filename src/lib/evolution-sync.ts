@@ -1,7 +1,7 @@
 import { randomUUID } from 'crypto';
 import { db } from './db';
 
-type EvolutionMessage = {
+export type EvolutionMessage = {
   key?: { id?: string; remoteJid?: string; remoteJidAlt?: string; senderPn?: string; fromMe?: boolean };
   pushName?: string | null;
   message?: Record<string, unknown>;
@@ -24,7 +24,7 @@ function messageText(message: Record<string, unknown> | undefined) {
   );
 }
 
-function usableJid(message: EvolutionMessage) {
+export function usableEvolutionJid(message: EvolutionMessage) {
   const jid = String(message.key?.remoteJid || '');
   const alternative = String(message.key?.remoteJidAlt || message.key?.senderPn || '');
   if (jid.endsWith('@lid') && alternative.endsWith('@s.whatsapp.net')) return alternative;
@@ -45,20 +45,38 @@ async function normalizeEvolutionAliases(workspaceId: string, messages: Evolutio
     include: { contact: true },
   });
   const byHandle = new Map(channels.map((channel) => [channel.handleId, channel]));
+  const existingAliases = new Set(channels.map((channel) => `${channel.contactId}:${channel.handleId}`));
+  const aliasesToCreate: Array<{ id: string; contactId: string; provider: string; handleId: string; optInStatus: boolean }> = [];
+  const contactsToUpdate = new Map<string, { phone: string | null; fullName: string }>();
   for (const [lid, phoneJid] of pairs) {
     const lidChannel = byHandle.get(lid);
     const phoneChannel = byHandle.get(phoneJid);
-    if (!lidChannel || phoneChannel) continue;
+    const target = phoneChannel || lidChannel;
+    if (!target) continue;
     const phone = phoneFromJid(phoneJid);
-    await db.$transaction([
-      db.contactChannel.update({ where: { id: lidChannel.id }, data: { handleId: phoneJid } }),
-      db.contact.update({
-        where: { id: lidChannel.contactId },
-        data: { phone, fullName: lidChannel.contact.fullName.includes('@lid') ? phone || lidChannel.contact.fullName : lidChannel.contact.fullName },
-      }),
-    ]);
-    byHandle.delete(lid);
-    byHandle.set(phoneJid, { ...lidChannel, handleId: phoneJid });
+    for (const handleId of [lid, phoneJid]) {
+      const aliasKey = `${target.contactId}:${handleId}`;
+      if (!existingAliases.has(aliasKey)) {
+        aliasesToCreate.push({ id: randomUUID(), contactId: target.contactId, provider: 'WHATSAPP', handleId, optInStatus: true });
+        existingAliases.add(aliasKey);
+      }
+    }
+    const relatedContacts = new Map([target, lidChannel, phoneChannel]
+      .filter((channel): channel is NonNullable<typeof channel> => Boolean(channel))
+      .map((channel) => [channel.contactId, channel.contact]));
+    for (const [contactId, contact] of relatedContacts) {
+      const fullName = contact.fullName.includes('@lid') ? phone || contact.fullName : contact.fullName;
+      if (contact.phone !== phone || contact.fullName !== fullName) {
+        contactsToUpdate.set(contactId, { phone, fullName });
+      }
+    }
+    byHandle.set(lid, target);
+    byHandle.set(phoneJid, target);
+  }
+  if (aliasesToCreate.length) await db.contactChannel.createMany({ data: aliasesToCreate });
+  const updates = [...contactsToUpdate.entries()];
+  for (let index = 0; index < updates.length; index += 50) {
+    await db.$transaction(updates.slice(index, index + 50).map(([contactId, data]) => db.contact.update({ where: { id: contactId }, data })));
   }
 }
 
@@ -84,7 +102,24 @@ export async function refreshEvolutionConversationOrder(input: { workspaceId: st
 }
 
 function evolutionMessageKey(channelId: string, message: EvolutionMessage) {
-  return `evolution:${channelId}:${usableJid(message)}:${message.key?.fromMe ? 'out' : 'in'}:${message.key?.id}`;
+  return `evolution:${channelId}:${usableEvolutionJid(message)}:${message.key?.fromMe ? 'out' : 'in'}:${message.key?.id}`;
+}
+
+export function evolutionMessageIdempotencyKey(channelId: string, message: EvolutionMessage) {
+  return evolutionMessageKey(channelId, message);
+}
+
+export function evolutionLidFromRawPayload(rawPayload: string | null | undefined) {
+  if (!rawPayload) return null;
+  try {
+    for (const message of evolutionMessagesFromPayload(JSON.parse(rawPayload))) {
+      const remoteJid = String(message.key?.remoteJid || '');
+      if (remoteJid.endsWith('@lid')) return remoteJid;
+    }
+  } catch {
+    // Old or manually-created messages can contain non-JSON payloads.
+  }
+  return null;
 }
 
 function phoneFromJid(jid: string) {
@@ -214,13 +249,11 @@ export async function persistEvolutionMessage(input: {
   rawPayload?: unknown;
 }) {
   const { workspaceId, channelId, message } = input;
-  const remoteJid = usableJid(message);
+  const remoteJid = usableEvolutionJid(message);
   const providerId = String(message.key?.id || '');
   if (!remoteJid || !providerId || remoteJid.endsWith('@broadcast')) return false;
   const idempotencyKey = evolutionMessageKey(channelId, message);
   if (await db.message.findUnique({ where: { idempotencyKey }, select: { id: true } })) return false;
-
-  await normalizeEvolutionAliases(workspaceId, [message]);
 
   let contactChannel = await db.contactChannel.findFirst({
     where: { provider: 'WHATSAPP', handleId: remoteJid, contact: { workspaceId } },
@@ -242,6 +275,7 @@ export async function persistEvolutionMessage(input: {
   } else if (message.pushName && contactChannel.contact.fullName === contactChannel.handleId) {
     await db.contact.update({ where: { id: contactChannel.contactId }, data: { fullName: message.pushName } });
   }
+  await normalizeEvolutionAliases(workspaceId, [message]);
 
   let conversation = await db.conversation.findFirst({
     where: { workspaceId, channelId, contactId: contactChannel.contactId, status: { not: 'CLOSED' } },
@@ -287,7 +321,7 @@ export async function persistEvolutionMessagesBatch(input: {
 }) {
   const unique = new Map<string, EvolutionMessage>();
   for (const message of input.messages) {
-    const jid = usableJid(message);
+    const jid = usableEvolutionJid(message);
     if (!jid || !message.key?.id || jid.endsWith('@broadcast')) continue;
     unique.set(evolutionMessageKey(input.channelId, message), message);
   }
@@ -296,11 +330,15 @@ export async function persistEvolutionMessagesBatch(input: {
   const existing = await db.message.findMany({ where: { idempotencyKey: { in: keys } }, select: { idempotencyKey: true } });
   const existingKeys = new Set(existing.map((item) => item.idempotencyKey));
   const pending = candidates.filter(([key]) => !existingKeys.has(key));
-  if (!pending.length) return 0;
-  await normalizeEvolutionAliases(input.workspaceId, pending.map(([, message]) => message));
+  if (!pending.length) {
+    // Repair older contacts where a LID was previously replaced by the phone
+    // JID, even when every fetched message already exists locally.
+    await normalizeEvolutionAliases(input.workspaceId, candidates.map(([, message]) => message));
+    return 0;
+  }
   const groups = new Map<string, Array<{ key: string; message: EvolutionMessage }>>();
   for (const [key, message] of pending) {
-    const jid = usableJid(message);
+    const jid = usableEvolutionJid(message);
     groups.set(jid, [...(groups.get(jid) || []), { key, message }]);
   }
   const contacts = await persistEvolutionContactsBatch({
@@ -308,6 +346,7 @@ export async function persistEvolutionMessagesBatch(input: {
     channelId: input.channelId,
     contacts: [...groups.entries()].map(([id, messages]) => ({ id, pushName: messages.find((item) => item.message.pushName)?.message.pushName })),
   });
+  await normalizeEvolutionAliases(input.workspaceId, candidates.map(([, message]) => message));
   const contactIds = [...contacts.contactIds.values()];
   const existingConversations = await db.conversation.findMany({
     where: { workspaceId: input.workspaceId, channelId: input.channelId, contactId: { in: contactIds }, status: { not: 'CLOSED' } },
@@ -321,7 +360,7 @@ export async function persistEvolutionMessagesBatch(input: {
     for (const row of rows) conversationIds.set(row.contactId, row.id);
   }
   const messageRows = pending.map(([key, message]) => {
-    const contactId = contacts.contactIds.get(usableJid(message))!;
+    const contactId = contacts.contactIds.get(usableEvolutionJid(message))!;
     return {
       conversationId: conversationIds.get(contactId)!,
       senderType: message.key?.fromMe ? 'USER' : 'CONTACT',
@@ -351,6 +390,7 @@ export async function persistEvolutionMessagesBatch(input: {
 export function evolutionMessagesFromPayload(payload: unknown): EvolutionMessage[] {
   if (!payload || typeof payload !== 'object') return [];
   const body = payload as { data?: unknown; messages?: { records?: unknown[] }; records?: unknown[] };
+  if ('key' in body && body.key && typeof body.key === 'object') return [body as EvolutionMessage];
   const data = body.data;
   if (Array.isArray(data)) return data as EvolutionMessage[];
   if (data && typeof data === 'object') {

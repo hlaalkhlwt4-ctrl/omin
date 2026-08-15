@@ -105,8 +105,12 @@ export function InboxClientView({
     };
     void loadConversations();
     void liveSync();
-    const timer = window.setInterval(liveSync, 10000);
-    return () => window.clearInterval(timer);
+    const conversationTimer = window.setInterval(loadConversations, 3000);
+    const liveSyncTimer = window.setInterval(liveSync, 15000);
+    return () => {
+      window.clearInterval(conversationTimer);
+      window.clearInterval(liveSyncTimer);
+    };
   }, []);
 
   useEffect(() => {
@@ -130,7 +134,7 @@ export function InboxClientView({
         for (const message of data.messages || []) merged.set(message.id, message);
         return Array.from(merged.values()).sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
       });
-    }, 10000);
+    }, 3000);
     return () => window.clearInterval(timer);
   }, [selectedConvId]);
 

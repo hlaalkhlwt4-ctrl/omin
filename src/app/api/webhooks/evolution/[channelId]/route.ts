@@ -21,11 +21,15 @@ export async function POST(request: NextRequest, context: { params: Promise<{ ch
   if (event === 'CONNECTION_UPDATE') {
     const state = String(payload.data?.state || '');
     await db.channel.update({ where: { id: channel.id }, data: { healthStatus: state === 'open' ? 'CONNECTED' : 'DISCONNECTED', isActive: state === 'open' } });
+    console.info('Evolution connection update', { channelId: channel.id, state });
   }
+  let imported = 0;
   if (['MESSAGES_UPSERT', 'SEND_MESSAGE', 'MESSAGES_SET'].includes(event)) {
-    for (const message of evolutionMessagesFromPayload(payload).slice(0, 1000)) {
-      await persistEvolutionMessage({ workspaceId: channel.workspaceId, channelId: channel.id, message, rawPayload: payload });
+    const messages = evolutionMessagesFromPayload(payload).slice(0, 1000);
+    for (const message of messages) {
+      if (await persistEvolutionMessage({ workspaceId: channel.workspaceId, channelId: channel.id, message, rawPayload: payload })) imported += 1;
     }
+    console.info('Evolution message webhook processed', { channelId: channel.id, event, received: messages.length, imported });
   }
-  return NextResponse.json({ received: true });
+  return NextResponse.json({ received: true, imported });
 }

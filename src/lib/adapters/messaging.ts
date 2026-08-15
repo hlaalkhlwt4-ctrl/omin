@@ -41,6 +41,13 @@ export interface MessagingAdapter {
   }>;
 }
 
+export function evolutionRecipientId(recipientId: string) {
+  const rawRecipient = recipientId.trim();
+  return rawRecipient.endsWith('@lid') || rawRecipient.endsWith('@g.us')
+    ? rawRecipient
+    : rawRecipient.replace(/@.*$/, '').replace(/\D/g, '');
+}
+
 // -----------------------------------------------------------------------------
 // Dev Mock Adapter (Local Testing)
 // -----------------------------------------------------------------------------
@@ -83,13 +90,21 @@ export class WhatsAppCloudAdapter implements MessagingAdapter {
   async sendMessage(channelConfig: any, payload: OutboundMessagePayload): Promise<SendMessageResult> {
     if (channelConfig.connectedVia === 'EVOLUTION_API' && channelConfig.instanceName) {
       try {
+        const number = evolutionRecipientId(payload.recipientId);
+        if (!number) return { success: false, error: 'معرّف واتساب للعميل غير صالح.' };
         const response = await evolutionRequest(`/message/sendText/${encodeURIComponent(channelConfig.instanceName)}`, {
           method: 'POST',
-          body: JSON.stringify({ number: payload.recipientId.replace(/@.*$/, '').replace(/\D/g, ''), text: payload.body, textMessage: { text: payload.body } }),
+          signal: AbortSignal.timeout(20_000),
+          body: JSON.stringify({ number, text: payload.body, delay: 300 }),
         });
         const data = await response.json().catch(() => ({}));
-        if (!response.ok) return { success: false, error: data?.message || `Evolution API HTTP ${response.status}`, providerRawResponse: data };
-        return { success: true, messageId: data?.key?.id, providerRawResponse: data };
+        const providerMessage = Array.isArray(data?.response?.message)
+          ? data.response.message.flat(Infinity).join(' ')
+          : data?.response?.message || data?.message;
+        if (!response.ok) return { success: false, error: typeof providerMessage === 'string' ? providerMessage : `Evolution API HTTP ${response.status}`, providerRawResponse: data };
+        const messageId = data?.key?.id || data?.message?.key?.id;
+        if (!messageId) return { success: false, error: 'قبل Evolution الطلب لكنه لم يُرجع معرّف رسالة؛ لم يتم اعتماد الإرسال.', providerRawResponse: data };
+        return { success: true, messageId, providerRawResponse: data };
       } catch (error) {
         return { success: false, error: error instanceof Error ? error.message : 'Evolution API network error' };
       }

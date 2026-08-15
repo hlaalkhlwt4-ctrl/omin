@@ -1,6 +1,6 @@
 import { createHmac } from 'crypto';
 import { describe, expect, it } from 'vitest';
-import { verifyMetaSignature } from './messaging';
+import { evolutionRecipientId, verifyMetaSignature } from './messaging';
 
 describe('Meta webhook signatures', () => {
   it('accepts a matching sha256 signature and rejects tampering', () => {
@@ -12,4 +12,16 @@ describe('Meta webhook signatures', () => {
   });
 
   it('rejects missing signatures', () => expect(verifyMetaSignature({}, '{}', 'secret')).toBe(false));
+});
+
+describe('Evolution recipients', () => {
+  it('keeps LID and group JIDs intact', () => {
+    expect(evolutionRecipientId('174693600497708@lid')).toBe('174693600497708@lid');
+    expect(evolutionRecipientId('120363389499655753@g.us')).toBe('120363389499655753@g.us');
+  });
+
+  it('normalizes phone JIDs and formatted phone numbers', () => {
+    expect(evolutionRecipientId('972567508786@s.whatsapp.net')).toBe('972567508786');
+    expect(evolutionRecipientId('+972 56-750-8786')).toBe('972567508786');
+  });
 });

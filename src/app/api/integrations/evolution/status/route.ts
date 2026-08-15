@@ -20,7 +20,7 @@ export async function GET() {
   const state = payload.instance?.state || 'close';
   const connected = state === 'open';
   if ((channel.healthStatus === 'CONNECTED') !== connected) {
-    await db.channel.update({ where: { id: channel.id }, data: { healthStatus: connected ? 'CONNECTED' : 'DISCONNECTED', isActive: true } });
+    await db.channel.update({ where: { id: channel.id }, data: { healthStatus: connected ? 'CONNECTED' : 'DISCONNECTED', isActive: connected } });
   }
   return NextResponse.json({ configured: true, state, connected });
 }
