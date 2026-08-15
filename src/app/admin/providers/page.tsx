@@ -1,14 +1,20 @@
 import Link from 'next/link';
 import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
-import { Bot, CheckCircle2, ChevronRight, Mail, ShieldAlert, XCircle } from 'lucide-react';
+import { Bot, CheckCircle2, ChevronRight, KeyRound, Mail, ShieldAlert, XCircle } from 'lucide-react';
 import { db } from '@/lib/db';
 import { getCurrentUser } from '@/lib/auth';
 import { createSmtpTransport } from '@/lib/email';
 import { decryptIntegrationConfig, encryptIntegrationConfig, maskSecret } from '@/lib/integration-secrets';
 import { getPlatformSmtpSettings } from '@/lib/platform-providers';
 import { structuredLog } from '@/lib/observability';
-import { AI_KEY_TYPES, AI_PROVIDERS, isAiProviderId } from '@/lib/ai-provider-catalog';
+import {
+  ADDABLE_AI_PROVIDER_IDS,
+  AI_PROVIDERS,
+  choosePreferredAiModel,
+  isAiProviderId,
+  type AddableAiProviderId,
+} from '@/lib/ai-provider-catalog';
 
 const fieldClass = 'mt-1 w-full rounded-xl border border-slate-300 bg-transparent p-3 text-xs dark:border-slate-700';
 const cardClass = 'rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900';
@@ -18,13 +24,6 @@ async function requireSuperAdmin() {
   if (!user) redirect('/login');
   if (!user.isSuperAdmin) redirect('/dashboard');
   return user;
-}
-
-function safeBaseUrl(value: string) {
-  const url = new URL(value);
-  const localAllowed = process.env.NODE_ENV !== 'production' && ['localhost', '127.0.0.1'].includes(url.hostname);
-  if (url.protocol !== 'https:' && !localAllowed) throw new Error('يجب أن يستخدم رابط المزود HTTPS.');
-  return url.toString().replace(/\/$/, '');
 }
 
 async function saveSmtp(formData: FormData) {
@@ -94,34 +93,104 @@ async function testSmtp(formData: FormData) {
   revalidatePath('/admin/providers');
 }
 
-async function saveAiModel(formData: FormData) {
+type AiKeyInspection = {
+  connected: boolean;
+  availableModels: string[];
+  modelId: string;
+  balance: number | null;
+  errorMessage: string;
+};
+
+async function inspectAiKey(input: { provider: AddableAiProviderId; apiKey: string; baseUrl?: string }): Promise<AiKeyInspection> {
+  const baseUrl = (input.baseUrl || AI_PROVIDERS[input.provider].baseUrl).replace(/\/$/, '');
+  try {
+    const response = await fetch(`${baseUrl}/models`, {
+      headers: { Authorization: `Bearer ${input.apiKey}` },
+      cache: 'no-store',
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}: ${(await response.text()).slice(0, 250)}`);
+    const body = await response.json() as { data?: Array<{ id?: string }> };
+    const availableModels = ((body.data?.map((item) => item.id).filter(Boolean) || []) as string[]).slice(0, 500);
+    const modelId = choosePreferredAiModel(input.provider, availableModels);
+    if (!modelId) throw new Error('تم قبول المفتاح، لكن المزود لم يُرجع أي نموذج متاح.');
+    let balance: number | null = null;
+    if (input.provider === 'OPENROUTER') {
+      const keyResponse = await fetch('https://openrouter.ai/api/v1/key', {
+        headers: { Authorization: `Bearer ${input.apiKey}` },
+        cache: 'no-store',
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!keyResponse.ok) throw new Error(`HTTP ${keyResponse.status}: مفتاح OpenRouter غير صالح.`);
+      const keyMetadata = await keyResponse.json() as { data?: { limit_remaining?: number | null } };
+      if (typeof keyMetadata.data?.limit_remaining === 'number' && Number.isFinite(keyMetadata.data.limit_remaining)) balance = keyMetadata.data.limit_remaining;
+      const creditResponse = await fetch('https://openrouter.ai/api/v1/credits', {
+        headers: { Authorization: `Bearer ${input.apiKey}` },
+        cache: 'no-store',
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (creditResponse.ok) {
+        const credits = await creditResponse.json() as { data?: { total_credits?: number; total_usage?: number } };
+        balance = Number(credits.data?.total_credits || 0) - Number(credits.data?.total_usage || 0);
+      }
+    }
+    return { connected: true, availableModels, modelId, balance, errorMessage: '' };
+  } catch (error) {
+    const rawMessage = error instanceof Error ? error.message : 'AI provider test failed';
+    return {
+      connected: false,
+      availableModels: [],
+      modelId: AI_PROVIDERS[input.provider].models[0] || 'unavailable',
+      balance: null,
+      errorMessage: rawMessage.replaceAll(input.apiKey, '[REDACTED]').slice(0, 500),
+    };
+  }
+}
+
+async function saveAndTestAiKey(formData: FormData) {
   'use server';
   const user = await requireSuperAdmin();
-  const id = String(formData.get('id') || '');
-  const existingRecord = id ? await db.platformAiModel.findUnique({ where: { id } }) : null;
-  const existing = existingRecord ? decryptIntegrationConfig(existingRecord.encryptedConfig) : {};
-  const displayName = String(formData.get('displayName') || '').trim();
-  const providerValue = String(formData.get('provider') || 'OPENAI');
-  const provider = isAiProviderId(providerValue) ? providerValue : 'CUSTOM';
-  const customModelId = String(formData.get('customModelId') || '').trim();
-  const modelId = customModelId || String(formData.get('modelId') || '').trim();
-  const configuredBaseUrl = provider === 'CUSTOM' ? String(formData.get('baseUrl') || '') : AI_PROVIDERS[provider].baseUrl;
-  const baseUrl = safeBaseUrl(configuredBaseUrl.trim());
-  const apiKey = String(formData.get('apiKey') || '').trim() || String(existing.apiKey || '');
-  const keyType = String(formData.get('keyType') || existing.keyType || 'STANDARD');
-  const priority = Math.min(100, Math.max(1, Number(formData.get('priority') || existing.priority || 10)));
-  const isActive = formData.get('isActive') === 'on';
-  const isDefault = formData.get('isDefault') === 'on';
-  if (!displayName || !modelId || !apiKey) return;
-  const encryptedConfig = encryptIntegrationConfig({ apiKey, keyType, priority, availableModels: existing.availableModels || [], balance: existing.balance ?? null, balanceCurrency: existing.balanceCurrency || 'USD' });
-  const model = await db.$transaction(async (tx) => {
-    if (isDefault) await tx.platformAiModel.updateMany({ data: { isDefault: false } });
-    return id
-      ? tx.platformAiModel.update({ where: { id }, data: { displayName, provider, modelId, baseUrl, encryptedConfig, isActive, isDefault, status: 'NOT_TESTED', lastError: null } })
-      : tx.platformAiModel.create({ data: { displayName, provider, modelId, baseUrl, encryptedConfig, isActive, isDefault } });
+  const providerValue = String(formData.get('provider') || '');
+  const apiKey = String(formData.get('apiKey') || '').trim();
+  if (!ADDABLE_AI_PROVIDER_IDS.includes(providerValue as AddableAiProviderId) || apiKey.length < 8) {
+    redirect('/admin/providers?ai=invalid');
+  }
+  const provider = providerValue as AddableAiProviderId;
+  const inspection = await inspectAiKey({ provider, apiKey });
+  const existingCount = await db.platformAiModel.count({ where: { provider } });
+  const hasDefault = await db.platformAiModel.count({ where: { isDefault: true } });
+  const shouldBeDefault = inspection.connected && hasDefault === 0;
+  const model = await db.platformAiModel.create({
+    data: {
+      displayName: AI_PROVIDERS[provider].label,
+      provider,
+      baseUrl: AI_PROVIDERS[provider].baseUrl,
+      modelId: inspection.modelId,
+      encryptedConfig: encryptIntegrationConfig({
+        apiKey,
+        priority: Math.min(existingCount + 1, 100),
+        availableModels: inspection.availableModels,
+        balance: inspection.balance,
+        balanceCurrency: 'USD',
+      }),
+      isActive: inspection.connected,
+      isDefault: shouldBeDefault,
+      status: inspection.connected ? 'CONNECTED' : 'ERROR',
+      lastTestedAt: new Date(),
+      lastError: inspection.connected ? null : inspection.errorMessage,
+    },
   });
-  await db.auditLog.create({ data: { actorId: user.id, action: id ? 'PLATFORM_AI_MODEL_UPDATED' : 'PLATFORM_AI_MODEL_CREATED', targetType: 'PLATFORM_AI_MODEL', targetId: model.id, metadata: JSON.stringify({ provider, modelId, baseUrl, keyType, priority, isDefault }) } });
+  await db.auditLog.create({
+    data: {
+      actorId: user.id,
+      action: 'PLATFORM_AI_KEY_CREATED_AND_TESTED',
+      targetType: 'PLATFORM_AI_MODEL',
+      targetId: model.id,
+      metadata: JSON.stringify({ provider, connected: inspection.connected, modelId: inspection.modelId, isDefault: shouldBeDefault }),
+    },
+  });
   revalidatePath('/admin/providers');
+  redirect(`/admin/providers?ai=${inspection.connected ? 'connected' : 'failed'}`);
 }
 
 async function testAiModel(formData: FormData) {
@@ -131,30 +200,21 @@ async function testAiModel(formData: FormData) {
   const model = await db.platformAiModel.findUnique({ where: { id } });
   if (!model) return;
   const config = decryptIntegrationConfig(model.encryptedConfig);
-  let connected = false;
-  let errorMessage = '';
-  let availableModels: string[] = [];
-  let balance: number | null = null;
-  try {
-    const response = await fetch(`${model.baseUrl.replace(/\/$/, '')}/models`, { headers: { Authorization: `Bearer ${String(config.apiKey || '')}` }, cache: 'no-store', signal: AbortSignal.timeout(15_000) });
-    if (!response.ok) throw new Error(`Provider HTTP ${response.status}: ${(await response.text()).slice(0, 300)}`);
-    const body = await response.json() as { data?: Array<{ id?: string }> };
-    availableModels = ((body.data?.map((item) => item.id).filter(Boolean) || []) as string[]).slice(0, 500);
-    if (availableModels.length > 0 && !availableModels.includes(model.modelId)) throw new Error(`تم الاتصال، لكن النموذج ${model.modelId} غير موجود في قائمة المزود. اختر نموذجًا من القائمة المتاحة.`);
-    if (model.provider === 'OPENROUTER') {
-      const creditResponse = await fetch('https://openrouter.ai/api/v1/credits', { headers: { Authorization: `Bearer ${String(config.apiKey || '')}` }, cache: 'no-store', signal: AbortSignal.timeout(15_000) });
-      if (creditResponse.ok) {
-        const credits = await creditResponse.json() as { data?: { total_credits?: number; total_usage?: number } };
-        balance = Number(credits.data?.total_credits || 0) - Number(credits.data?.total_usage || 0);
-      }
-    }
-    connected = true;
-  } catch (error) {
-    errorMessage = error instanceof Error ? error.message : 'AI provider test failed';
-  }
+  const provider: AddableAiProviderId = isAiProviderId(model.provider) && model.provider !== 'CUSTOM' ? model.provider : 'OPENAI';
+  const inspection = await inspectAiKey({ provider, apiKey: String(config.apiKey || ''), baseUrl: model.baseUrl });
   await db.$transaction([
-    db.platformAiModel.update({ where: { id }, data: { encryptedConfig: encryptIntegrationConfig({ ...config, availableModels, balance, balanceCurrency: 'USD' }), status: connected ? 'CONNECTED' : 'ERROR', lastTestedAt: new Date(), lastError: connected ? null : errorMessage.slice(0, 500) } }),
-    db.auditLog.create({ data: { actorId: user.id, action: 'PLATFORM_AI_MODEL_TESTED', targetType: 'PLATFORM_AI_MODEL', targetId: id, metadata: JSON.stringify({ connected, modelId: model.modelId }) } }),
+    db.platformAiModel.update({
+      where: { id },
+      data: {
+        modelId: inspection.modelId,
+        encryptedConfig: encryptIntegrationConfig({ ...config, availableModels: inspection.availableModels, balance: inspection.balance, balanceCurrency: 'USD' }),
+        isActive: inspection.connected,
+        status: inspection.connected ? 'CONNECTED' : 'ERROR',
+        lastTestedAt: new Date(),
+        lastError: inspection.connected ? null : inspection.errorMessage,
+      },
+    }),
+    db.auditLog.create({ data: { actorId: user.id, action: 'PLATFORM_AI_MODEL_TESTED', targetType: 'PLATFORM_AI_MODEL', targetId: id, metadata: JSON.stringify({ connected: inspection.connected, modelId: inspection.modelId }) } }),
   ]);
   revalidatePath('/admin/providers');
 }
@@ -179,9 +239,9 @@ function StatusBadge({ status }: { status: string }) {
   return <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[10px] font-bold ${connected ? 'bg-emerald-100 text-emerald-700' : failed ? 'bg-rose-100 text-rose-700' : 'bg-slate-100 text-slate-600'}`}>{connected ? <CheckCircle2 className="h-3 w-3" /> : failed ? <XCircle className="h-3 w-3" /> : <ShieldAlert className="h-3 w-3" />}{connected ? 'متصل' : failed ? 'فشل الفحص' : 'غير مفحوص'}</span>;
 }
 
-export default async function PlatformProvidersPage({ searchParams }: { searchParams: Promise<{ smtp?: string }> }) {
+export default async function PlatformProvidersPage({ searchParams }: { searchParams: Promise<{ smtp?: string; ai?: string }> }) {
   await requireSuperAdmin();
-  const { smtp: smtpResult } = await searchParams;
+  const { smtp: smtpResult, ai: aiResult } = await searchParams;
   const [smtpRecord, models] = await Promise.all([
     db.platformEmailConfig.findUnique({ where: { id: 'default' } }),
     db.platformAiModel.findMany({ orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }] }),
@@ -190,25 +250,60 @@ export default async function PlatformProvidersPage({ searchParams }: { searchPa
 
   return <div dir="rtl" className="min-h-screen bg-slate-100 text-slate-950 dark:bg-slate-950 dark:text-white">
     <main className="mx-auto max-w-6xl space-y-7 px-4 py-8">
-      <div className="flex flex-wrap items-center justify-between gap-3"><div><Link href="/admin" className="mb-2 inline-flex items-center gap-1 text-xs text-brand-600"><ChevronRight className="h-4 w-4" />العودة إلى Super Admin</Link><h1 className="text-2xl font-extrabold">البريد ونماذج الذكاء الاصطناعي</h1><p className="mt-2 text-sm text-slate-500">إعدادات مركزية لكل المنصة. الأسرار مشفرة ولا تظهر بعد الحفظ.</p></div></div>
+      <div className="flex flex-wrap items-center justify-between gap-3"><div><Link href="/admin" className="mb-2 inline-flex items-center gap-1 text-xs text-brand-600"><ChevronRight className="h-4 w-4" />العودة إلى Super Admin</Link><h1 className="text-2xl font-extrabold">البريد ومفاتيح الذكاء الاصطناعي</h1><p className="mt-2 text-sm text-slate-500">إعدادات مركزية لكل المنصة. المفاتيح مشفرة ولا تظهر بعد الحفظ.</p></div></div>
 
       {smtpResult === 'saved' && <p role="status" className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-xs font-bold text-emerald-700">تم حفظ إعدادات SMTP بنجاح. اضغط فحص الاتصال للتأكد من بيانات Hostinger.</p>}
       {smtpResult === 'invalid' && <p role="alert" className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs font-bold text-amber-700">تحقق من جميع الحقول والمنفذ ثم حاول الحفظ مرة أخرى.</p>}
       {smtpResult === 'failed' && <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs font-bold text-rose-700">تعذر حفظ إعدادات SMTP. لم يتم كشف أي بيانات سرية، وتم تسجيل سبب المشكلة في الخادم.</p>}
+      {aiResult === 'connected' && <p role="status" className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-xs font-bold text-emerald-700">تم حفظ المفتاح وفحصه بنجاح، واختير أفضل نموذج متاح تلقائيًا.</p>}
+      {aiResult === 'failed' && <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs font-bold text-rose-700">تم حفظ المفتاح، لكن فحصه فشل. راجع سبب الفشل في بطاقة المفتاح.</p>}
+      {aiResult === 'invalid' && <p role="alert" className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs font-bold text-amber-700">اختر المزوّد والصق مفتاح API صالحًا.</p>}
 
       <section className={`${cardClass} space-y-5`}><div className="flex items-center justify-between gap-3"><h2 className="flex items-center gap-2 font-bold"><Mail className="h-5 w-5 text-sky-600" />SMTP للرسائل النظامية</h2><StatusBadge status={smtpRecord?.status || 'NOT_TESTED'} /></div><form action={saveSmtp} className="grid gap-3 md:grid-cols-2"><label className="text-xs font-bold">SMTP Host<input name="host" required defaultValue={String(smtp.host || '')} placeholder="smtp.example.com" className={fieldClass} /></label><label className="text-xs font-bold">Port<input name="port" type="number" min="1" max="65535" required defaultValue={Number(smtp.port || 587)} className={fieldClass} /></label><label className="text-xs font-bold">اسم المستخدم<input name="user" required defaultValue={String(smtp.user || '')} autoComplete="username" className={fieldClass} /></label><label className="text-xs font-bold">كلمة المرور<input name="pass" type="password" autoComplete="new-password" placeholder={maskSecret(String(smtp.pass || ''))} className={fieldClass} /></label><label className="text-xs font-bold">بريد الإرسال<input name="fromEmail" type="email" required defaultValue={String(smtp.fromEmail || '')} className={fieldClass} /></label><label className="text-xs font-bold">اسم المرسل<input name="fromName" required defaultValue={String(smtp.fromName || 'OmniFlow')} className={fieldClass} /></label><label className="flex items-center gap-2 text-xs"><input type="checkbox" name="secure" defaultChecked={Boolean(smtp.secure)} />اتصال SSL مباشر (غالبًا للمنفذ 465)</label><button className="rounded-xl bg-brand-600 px-4 py-3 text-xs font-bold text-white md:col-span-2">حفظ إعداد SMTP</button></form><form action={testSmtp} className="flex flex-wrap gap-2 border-t border-slate-100 pt-4 dark:border-slate-800"><input name="testEmail" type="email" placeholder="بريد اختبار اختياري" className="min-w-56 flex-1 rounded-xl border bg-transparent p-2.5 text-xs" /><button disabled={!smtpRecord} className="rounded-xl border px-4 py-2.5 text-xs font-bold disabled:opacity-40">فحص الاتصال وإرسال اختبار</button></form>{smtpRecord?.lastError && <p className="rounded-xl bg-rose-50 p-3 text-xs text-rose-700">{smtpRecord.lastError}</p>}</section>
 
-      <section className="space-y-4"><div><h2 className="flex items-center gap-2 text-lg font-bold"><Bot className="h-5 w-5 text-violet-600" />نماذج AI</h2><p className="mt-1 text-xs text-slate-500">يدعم OpenAI وأي مزود يطبق واجهة OpenAI المتوافقة. لا يمكن اعتماد نموذج افتراضي إلا بعد نجاح الفحص.</p></div><div className="grid gap-4 lg:grid-cols-2">{models.map((model) => <AiModelForm key={model.id} model={model} />)}<AiModelForm /></div></section>
+      <section className="space-y-4">
+        <div>
+          <h2 className="flex items-center gap-2 text-lg font-bold"><Bot className="h-5 w-5 text-violet-600" />مفاتيح الذكاء الاصطناعي</h2>
+          <p className="mt-1 text-xs text-slate-500">اختر المزوّد والصق المفتاح فقط. ستحفظ المنصة المفتاح مشفّرًا، وتفحصه، وتسحب النماذج والرصيد المتاح تلقائيًا.</p>
+        </div>
+        <form action={saveAndTestAiKey} className={`${cardClass} grid gap-4 md:grid-cols-[220px_1fr_auto] md:items-end`}>
+          <label className="text-xs font-bold">المزوّد
+            <select name="provider" required defaultValue="OPENAI" className={fieldClass}>
+              {ADDABLE_AI_PROVIDER_IDS.map((providerId) => <option key={providerId} value={providerId}>{AI_PROVIDERS[providerId].label}</option>)}
+            </select>
+          </label>
+          <label className="text-xs font-bold">API Key
+            <input name="apiKey" type="password" required minLength={8} autoComplete="new-password" placeholder="الصق المفتاح هنا" className={fieldClass} />
+          </label>
+          <button className="rounded-xl bg-slate-900 px-5 py-3 text-xs font-bold text-white dark:bg-white dark:text-slate-900">حفظ وفحص المفتاح</button>
+        </form>
+        <div className="grid gap-4 lg:grid-cols-2">{models.map((model) => <AiKeyCard key={model.id} model={model} />)}</div>
+      </section>
     </main>
   </div>;
 }
 
 type AiModelItem = Awaited<ReturnType<typeof db.platformAiModel.findFirst>>;
 
-function AiModelForm({ model }: { model?: NonNullable<AiModelItem> }) {
-  const secret = model ? decryptIntegrationConfig(model.encryptedConfig) : {};
-  const provider = isAiProviderId(model?.provider || '') ? model!.provider as keyof typeof AI_PROVIDERS : 'CUSTOM';
+function AiKeyCard({ model }: { model: NonNullable<AiModelItem> }) {
+  const secret = decryptIntegrationConfig(model.encryptedConfig);
+  const provider = isAiProviderId(model.provider) ? model.provider : 'CUSTOM';
   const discovered = Array.isArray(secret.availableModels) ? secret.availableModels.map(String) : [];
-  const choices = [...new Set([...AI_PROVIDERS[provider].models, ...discovered, ...(model?.modelId ? [model.modelId] : [])])];
-  return <div className={`${cardClass} space-y-4`}><div className="flex items-center justify-between gap-2"><div><b>{model?.displayName || 'إضافة نموذج جديد'}</b>{model?.isDefault && <span className="mr-2 rounded bg-violet-100 px-2 py-1 text-[10px] text-violet-700">الافتراضي</span>}</div>{model && <StatusBadge status={model.status} />}</div>{model && <div className="grid grid-cols-3 gap-2 rounded-xl bg-slate-50 p-3 text-[10px] dark:bg-slate-800"><span>النوع: <b>{AI_PROVIDERS[provider].label}</b></span><span>الأولوية: <b>{String(secret.priority || 10)}</b></span><span>الرصيد: <b>{secret.balance == null ? 'غير مدعوم/غير متاح' : `${Number(secret.balance).toFixed(3)} ${String(secret.balanceCurrency || 'USD')}`}</b></span></div>}<form action={saveAiModel} className="grid gap-3"><input type="hidden" name="id" value={model?.id || ''} /><label className="text-xs font-bold">اسم العرض<input name="displayName" required defaultValue={model?.displayName} placeholder="OpenAI GPT-4.1 mini" className={fieldClass} /></label><label className="text-xs font-bold">نوع المزود<select name="provider" defaultValue={provider} className={fieldClass}>{Object.entries(AI_PROVIDERS).map(([id, item]) => <option key={id} value={id}>{item.label}</option>)}</select></label><label className="text-xs font-bold">Base URL (للمزود المخصص فقط)<input name="baseUrl" type="url" defaultValue={model?.baseUrl || 'https://api.openai.com/v1'} className={fieldClass} /></label><label className="text-xs font-bold">النموذج<select name="modelId" defaultValue={model?.modelId || AI_PROVIDERS.OPENAI.models[1]} className={fieldClass}>{choices.length > 0 && <optgroup label={`${AI_PROVIDERS[provider].label} — المتاحة`}>{choices.map((modelId) => <option key={`available-${modelId}`} value={modelId}>{modelId}</option>)}</optgroup>}{Object.entries(AI_PROVIDERS).filter(([id]) => id !== provider).map(([id, item]) => item.models.length > 0 && <optgroup key={id} label={item.label}>{item.models.map((modelId) => <option key={`${id}-${modelId}`} value={modelId}>{modelId}</option>)}</optgroup>)}</select></label><label className="text-xs font-bold">Model ID مخصص (اختياري)<input name="customModelId" placeholder="اتركه فارغًا لاستخدام الاختيار أعلاه" className={fieldClass} /></label><div className="grid gap-3 sm:grid-cols-2"><label className="text-xs font-bold">نوع المفتاح<select name="keyType" defaultValue={String(secret.keyType || 'STANDARD')} className={fieldClass}>{AI_KEY_TYPES.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label><label className="text-xs font-bold">الأولوية (1 أعلى)<input name="priority" type="number" min="1" max="100" defaultValue={Number(secret.priority || 10)} className={fieldClass} /></label></div><label className="text-xs font-bold">API Key<input name="apiKey" type="password" autoComplete="new-password" placeholder={maskSecret(String(secret.apiKey || ''))} className={fieldClass} /></label><div className="flex flex-wrap gap-4"><label className="flex items-center gap-2 text-xs"><input type="checkbox" name="isActive" defaultChecked={model?.isActive ?? true} />نشط</label><label className="flex items-center gap-2 text-xs"><input type="checkbox" name="isDefault" defaultChecked={model?.isDefault} />افتراضي عند الحفظ</label></div><button className="rounded-xl bg-slate-900 px-4 py-2.5 text-xs font-bold text-white dark:bg-white dark:text-slate-900">{model ? 'حفظ النموذج' : 'إضافة النموذج'}</button></form>{model && <div className="flex flex-wrap gap-2 border-t border-slate-100 pt-3 dark:border-slate-800"><form action={testAiModel}><input type="hidden" name="id" value={model.id} /><button className="rounded-xl border px-3 py-2 text-xs font-bold">فحص API والنموذج وسحب الرصيد</button></form>{!model.isDefault && <form action={makeDefaultModel}><input type="hidden" name="id" value={model.id} /><button disabled={model.status !== 'CONNECTED' || !model.isActive} className="rounded-xl border px-3 py-2 text-xs font-bold disabled:opacity-40">جعله افتراضيًا</button></form>}</div>}{model?.lastError && <p className="rounded-xl bg-rose-50 p-3 text-xs text-rose-700">{model.lastError}</p>}</div>;
+  return <article className={`${cardClass} space-y-4`}>
+    <div className="flex items-center justify-between gap-2">
+      <div className="flex items-center gap-2"><KeyRound className="h-4 w-4 text-violet-600" /><b>{AI_PROVIDERS[provider].label}</b>{model.isDefault && <span className="rounded bg-violet-100 px-2 py-1 text-[10px] text-violet-700">الافتراضي</span>}</div>
+      <StatusBadge status={model.status} />
+    </div>
+    <div className="grid gap-3 rounded-xl bg-slate-50 p-3 text-[11px] dark:bg-slate-800 sm:grid-cols-2">
+      <span>المفتاح: <b dir="ltr">{maskSecret(String(secret.apiKey || ''))}</b></span>
+      <span>النموذج التلقائي: <b dir="ltr">{model.modelId}</b></span>
+      <span>النماذج المكتشفة: <b>{discovered.length}</b></span>
+      <span>الرصيد: <b>{secret.balance == null ? 'غير متاح من المزود' : `${Number(secret.balance).toFixed(3)} ${String(secret.balanceCurrency || 'USD')}`}</b></span>
+    </div>
+    <div className="flex flex-wrap gap-2 border-t border-slate-100 pt-3 dark:border-slate-800">
+      <form action={testAiModel}><input type="hidden" name="id" value={model.id} /><button className="rounded-xl border px-3 py-2 text-xs font-bold">إعادة فحص المفتاح</button></form>
+      {!model.isDefault && <form action={makeDefaultModel}><input type="hidden" name="id" value={model.id} /><button disabled={model.status !== 'CONNECTED' || !model.isActive} className="rounded-xl border px-3 py-2 text-xs font-bold disabled:opacity-40">استخدامه افتراضيًا</button></form>}
+    </div>
+    {model.lastError && <p className="rounded-xl bg-rose-50 p-3 text-xs text-rose-700">{model.lastError}</p>}
+  </article>;
 }

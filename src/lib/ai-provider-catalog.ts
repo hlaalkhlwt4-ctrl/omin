@@ -33,6 +33,15 @@ export const AI_PROVIDERS = {
 
 export type AiProviderId = keyof typeof AI_PROVIDERS;
 
+export const ADDABLE_AI_PROVIDER_IDS = ['OPENAI', 'OPENROUTER', 'GROQ', 'GEMINI', 'DEEPSEEK'] as const;
+
+export type AddableAiProviderId = typeof ADDABLE_AI_PROVIDER_IDS[number];
+
+export function choosePreferredAiModel(provider: AddableAiProviderId, availableModels: string[]) {
+  const available = new Set(availableModels);
+  return AI_PROVIDERS[provider].models.find((modelId) => available.has(modelId)) || availableModels[0] || null;
+}
+
 export const AI_KEY_TYPES = [
   { id: 'STANDARD', label: 'مفتاح API عادي' },
   { id: 'PROJECT', label: 'مفتاح مشروع' },
