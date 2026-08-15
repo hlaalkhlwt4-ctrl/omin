@@ -8,6 +8,7 @@ import { createSmtpTransport } from '@/lib/email';
 import { decryptIntegrationConfig, encryptIntegrationConfig, maskSecret } from '@/lib/integration-secrets';
 import { getPlatformSmtpSettings } from '@/lib/platform-providers';
 import { structuredLog } from '@/lib/observability';
+import { AI_KEY_TYPES, AI_PROVIDERS, isAiProviderId } from '@/lib/ai-provider-catalog';
 
 const fieldClass = 'mt-1 w-full rounded-xl border border-slate-300 bg-transparent p-3 text-xs dark:border-slate-700';
 const cardClass = 'rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900';
@@ -100,20 +101,26 @@ async function saveAiModel(formData: FormData) {
   const existingRecord = id ? await db.platformAiModel.findUnique({ where: { id } }) : null;
   const existing = existingRecord ? decryptIntegrationConfig(existingRecord.encryptedConfig) : {};
   const displayName = String(formData.get('displayName') || '').trim();
-  const modelId = String(formData.get('modelId') || '').trim();
-  const baseUrl = safeBaseUrl(String(formData.get('baseUrl') || 'https://api.openai.com/v1').trim());
+  const providerValue = String(formData.get('provider') || 'OPENAI');
+  const provider = isAiProviderId(providerValue) ? providerValue : 'CUSTOM';
+  const customModelId = String(formData.get('customModelId') || '').trim();
+  const modelId = customModelId || String(formData.get('modelId') || '').trim();
+  const configuredBaseUrl = provider === 'CUSTOM' ? String(formData.get('baseUrl') || '') : AI_PROVIDERS[provider].baseUrl;
+  const baseUrl = safeBaseUrl(configuredBaseUrl.trim());
   const apiKey = String(formData.get('apiKey') || '').trim() || String(existing.apiKey || '');
+  const keyType = String(formData.get('keyType') || existing.keyType || 'STANDARD');
+  const priority = Math.min(100, Math.max(1, Number(formData.get('priority') || existing.priority || 10)));
   const isActive = formData.get('isActive') === 'on';
   const isDefault = formData.get('isDefault') === 'on';
   if (!displayName || !modelId || !apiKey) return;
-  const encryptedConfig = encryptIntegrationConfig({ apiKey });
+  const encryptedConfig = encryptIntegrationConfig({ apiKey, keyType, priority, availableModels: existing.availableModels || [], balance: existing.balance ?? null, balanceCurrency: existing.balanceCurrency || 'USD' });
   const model = await db.$transaction(async (tx) => {
     if (isDefault) await tx.platformAiModel.updateMany({ data: { isDefault: false } });
     return id
-      ? tx.platformAiModel.update({ where: { id }, data: { displayName, modelId, baseUrl, encryptedConfig, isActive, isDefault, status: 'NOT_TESTED', lastError: null } })
-      : tx.platformAiModel.create({ data: { displayName, modelId, baseUrl, encryptedConfig, isActive, isDefault } });
+      ? tx.platformAiModel.update({ where: { id }, data: { displayName, provider, modelId, baseUrl, encryptedConfig, isActive, isDefault, status: 'NOT_TESTED', lastError: null } })
+      : tx.platformAiModel.create({ data: { displayName, provider, modelId, baseUrl, encryptedConfig, isActive, isDefault } });
   });
-  await db.auditLog.create({ data: { actorId: user.id, action: id ? 'PLATFORM_AI_MODEL_UPDATED' : 'PLATFORM_AI_MODEL_CREATED', targetType: 'PLATFORM_AI_MODEL', targetId: model.id, metadata: JSON.stringify({ modelId, baseUrl, isDefault }) } });
+  await db.auditLog.create({ data: { actorId: user.id, action: id ? 'PLATFORM_AI_MODEL_UPDATED' : 'PLATFORM_AI_MODEL_CREATED', targetType: 'PLATFORM_AI_MODEL', targetId: model.id, metadata: JSON.stringify({ provider, modelId, baseUrl, keyType, priority, isDefault }) } });
   revalidatePath('/admin/providers');
 }
 
@@ -126,18 +133,27 @@ async function testAiModel(formData: FormData) {
   const config = decryptIntegrationConfig(model.encryptedConfig);
   let connected = false;
   let errorMessage = '';
+  let availableModels: string[] = [];
+  let balance: number | null = null;
   try {
     const response = await fetch(`${model.baseUrl.replace(/\/$/, '')}/models`, { headers: { Authorization: `Bearer ${String(config.apiKey || '')}` }, cache: 'no-store', signal: AbortSignal.timeout(15_000) });
     if (!response.ok) throw new Error(`Provider HTTP ${response.status}: ${(await response.text()).slice(0, 300)}`);
     const body = await response.json() as { data?: Array<{ id?: string }> };
-    const ids = body.data?.map((item) => item.id).filter(Boolean) || [];
-    if (ids.length > 0 && !ids.includes(model.modelId)) throw new Error(`تم الاتصال، لكن النموذج ${model.modelId} غير موجود في قائمة المزود.`);
+    availableModels = ((body.data?.map((item) => item.id).filter(Boolean) || []) as string[]).slice(0, 500);
+    if (availableModels.length > 0 && !availableModels.includes(model.modelId)) throw new Error(`تم الاتصال، لكن النموذج ${model.modelId} غير موجود في قائمة المزود. اختر نموذجًا من القائمة المتاحة.`);
+    if (model.provider === 'OPENROUTER') {
+      const creditResponse = await fetch('https://openrouter.ai/api/v1/credits', { headers: { Authorization: `Bearer ${String(config.apiKey || '')}` }, cache: 'no-store', signal: AbortSignal.timeout(15_000) });
+      if (creditResponse.ok) {
+        const credits = await creditResponse.json() as { data?: { total_credits?: number; total_usage?: number } };
+        balance = Number(credits.data?.total_credits || 0) - Number(credits.data?.total_usage || 0);
+      }
+    }
     connected = true;
   } catch (error) {
     errorMessage = error instanceof Error ? error.message : 'AI provider test failed';
   }
   await db.$transaction([
-    db.platformAiModel.update({ where: { id }, data: { status: connected ? 'CONNECTED' : 'ERROR', lastTestedAt: new Date(), lastError: connected ? null : errorMessage.slice(0, 500) } }),
+    db.platformAiModel.update({ where: { id }, data: { encryptedConfig: encryptIntegrationConfig({ ...config, availableModels, balance, balanceCurrency: 'USD' }), status: connected ? 'CONNECTED' : 'ERROR', lastTestedAt: new Date(), lastError: connected ? null : errorMessage.slice(0, 500) } }),
     db.auditLog.create({ data: { actorId: user.id, action: 'PLATFORM_AI_MODEL_TESTED', targetType: 'PLATFORM_AI_MODEL', targetId: id, metadata: JSON.stringify({ connected, modelId: model.modelId }) } }),
   ]);
   revalidatePath('/admin/providers');
@@ -191,5 +207,8 @@ type AiModelItem = Awaited<ReturnType<typeof db.platformAiModel.findFirst>>;
 
 function AiModelForm({ model }: { model?: NonNullable<AiModelItem> }) {
   const secret = model ? decryptIntegrationConfig(model.encryptedConfig) : {};
-  return <div className={`${cardClass} space-y-4`}><div className="flex items-center justify-between gap-2"><div><b>{model?.displayName || 'إضافة نموذج جديد'}</b>{model?.isDefault && <span className="mr-2 rounded bg-violet-100 px-2 py-1 text-[10px] text-violet-700">الافتراضي</span>}</div>{model && <StatusBadge status={model.status} />}</div><form action={saveAiModel} className="grid gap-3"><input type="hidden" name="id" value={model?.id || ''} /><label className="text-xs font-bold">اسم العرض<input name="displayName" required defaultValue={model?.displayName} placeholder="OpenAI GPT-4.1 mini" className={fieldClass} /></label><label className="text-xs font-bold">Base URL<input name="baseUrl" type="url" required defaultValue={model?.baseUrl || 'https://api.openai.com/v1'} className={fieldClass} /></label><label className="text-xs font-bold">Model ID<input name="modelId" required defaultValue={model?.modelId} placeholder="gpt-4.1-mini" className={fieldClass} /></label><label className="text-xs font-bold">API Key<input name="apiKey" type="password" autoComplete="new-password" placeholder={maskSecret(String(secret.apiKey || ''))} className={fieldClass} /></label><div className="flex flex-wrap gap-4"><label className="flex items-center gap-2 text-xs"><input type="checkbox" name="isActive" defaultChecked={model?.isActive ?? true} />نشط</label><label className="flex items-center gap-2 text-xs"><input type="checkbox" name="isDefault" defaultChecked={model?.isDefault} />افتراضي عند الحفظ</label></div><button className="rounded-xl bg-slate-900 px-4 py-2.5 text-xs font-bold text-white dark:bg-white dark:text-slate-900">{model ? 'حفظ النموذج' : 'إضافة النموذج'}</button></form>{model && <div className="flex flex-wrap gap-2 border-t border-slate-100 pt-3 dark:border-slate-800"><form action={testAiModel}><input type="hidden" name="id" value={model.id} /><button className="rounded-xl border px-3 py-2 text-xs font-bold">فحص API والنموذج</button></form>{!model.isDefault && <form action={makeDefaultModel}><input type="hidden" name="id" value={model.id} /><button disabled={model.status !== 'CONNECTED' || !model.isActive} className="rounded-xl border px-3 py-2 text-xs font-bold disabled:opacity-40">جعله افتراضيًا</button></form>}</div>}{model?.lastError && <p className="rounded-xl bg-rose-50 p-3 text-xs text-rose-700">{model.lastError}</p>}</div>;
+  const provider = isAiProviderId(model?.provider || '') ? model!.provider as keyof typeof AI_PROVIDERS : 'CUSTOM';
+  const discovered = Array.isArray(secret.availableModels) ? secret.availableModels.map(String) : [];
+  const choices = [...new Set([...AI_PROVIDERS[provider].models, ...discovered, ...(model?.modelId ? [model.modelId] : [])])];
+  return <div className={`${cardClass} space-y-4`}><div className="flex items-center justify-between gap-2"><div><b>{model?.displayName || 'إضافة نموذج جديد'}</b>{model?.isDefault && <span className="mr-2 rounded bg-violet-100 px-2 py-1 text-[10px] text-violet-700">الافتراضي</span>}</div>{model && <StatusBadge status={model.status} />}</div>{model && <div className="grid grid-cols-3 gap-2 rounded-xl bg-slate-50 p-3 text-[10px] dark:bg-slate-800"><span>النوع: <b>{AI_PROVIDERS[provider].label}</b></span><span>الأولوية: <b>{String(secret.priority || 10)}</b></span><span>الرصيد: <b>{secret.balance == null ? 'غير مدعوم/غير متاح' : `${Number(secret.balance).toFixed(3)} ${String(secret.balanceCurrency || 'USD')}`}</b></span></div>}<form action={saveAiModel} className="grid gap-3"><input type="hidden" name="id" value={model?.id || ''} /><label className="text-xs font-bold">اسم العرض<input name="displayName" required defaultValue={model?.displayName} placeholder="OpenAI GPT-4.1 mini" className={fieldClass} /></label><label className="text-xs font-bold">نوع المزود<select name="provider" defaultValue={provider} className={fieldClass}>{Object.entries(AI_PROVIDERS).map(([id, item]) => <option key={id} value={id}>{item.label}</option>)}</select></label><label className="text-xs font-bold">Base URL (للمزود المخصص فقط)<input name="baseUrl" type="url" defaultValue={model?.baseUrl || 'https://api.openai.com/v1'} className={fieldClass} /></label><label className="text-xs font-bold">النموذج<select name="modelId" defaultValue={model?.modelId || AI_PROVIDERS.OPENAI.models[1]} className={fieldClass}>{choices.length > 0 && <optgroup label={`${AI_PROVIDERS[provider].label} — المتاحة`}>{choices.map((modelId) => <option key={`available-${modelId}`} value={modelId}>{modelId}</option>)}</optgroup>}{Object.entries(AI_PROVIDERS).filter(([id]) => id !== provider).map(([id, item]) => item.models.length > 0 && <optgroup key={id} label={item.label}>{item.models.map((modelId) => <option key={`${id}-${modelId}`} value={modelId}>{modelId}</option>)}</optgroup>)}</select></label><label className="text-xs font-bold">Model ID مخصص (اختياري)<input name="customModelId" placeholder="اتركه فارغًا لاستخدام الاختيار أعلاه" className={fieldClass} /></label><div className="grid gap-3 sm:grid-cols-2"><label className="text-xs font-bold">نوع المفتاح<select name="keyType" defaultValue={String(secret.keyType || 'STANDARD')} className={fieldClass}>{AI_KEY_TYPES.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label><label className="text-xs font-bold">الأولوية (1 أعلى)<input name="priority" type="number" min="1" max="100" defaultValue={Number(secret.priority || 10)} className={fieldClass} /></label></div><label className="text-xs font-bold">API Key<input name="apiKey" type="password" autoComplete="new-password" placeholder={maskSecret(String(secret.apiKey || ''))} className={fieldClass} /></label><div className="flex flex-wrap gap-4"><label className="flex items-center gap-2 text-xs"><input type="checkbox" name="isActive" defaultChecked={model?.isActive ?? true} />نشط</label><label className="flex items-center gap-2 text-xs"><input type="checkbox" name="isDefault" defaultChecked={model?.isDefault} />افتراضي عند الحفظ</label></div><button className="rounded-xl bg-slate-900 px-4 py-2.5 text-xs font-bold text-white dark:bg-white dark:text-slate-900">{model ? 'حفظ النموذج' : 'إضافة النموذج'}</button></form>{model && <div className="flex flex-wrap gap-2 border-t border-slate-100 pt-3 dark:border-slate-800"><form action={testAiModel}><input type="hidden" name="id" value={model.id} /><button className="rounded-xl border px-3 py-2 text-xs font-bold">فحص API والنموذج وسحب الرصيد</button></form>{!model.isDefault && <form action={makeDefaultModel}><input type="hidden" name="id" value={model.id} /><button disabled={model.status !== 'CONNECTED' || !model.isActive} className="rounded-xl border px-3 py-2 text-xs font-bold disabled:opacity-40">جعله افتراضيًا</button></form>}</div>}{model?.lastError && <p className="rounded-xl bg-rose-50 p-3 text-xs text-rose-700">{model.lastError}</p>}</div>;
 }

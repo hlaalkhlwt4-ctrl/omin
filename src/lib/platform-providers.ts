@@ -48,10 +48,16 @@ export async function getPlatformSmtpSettings(options: { allowUntested?: boolean
 }
 
 export async function getDefaultAiModelSettings(): Promise<PlatformAiModelSettings | null> {
-  const saved = await db.platformAiModel.findFirst({
-    where: { isActive: true, isDefault: true, status: 'CONNECTED' },
-    orderBy: { updatedAt: 'desc' },
+  const candidates = await db.platformAiModel.findMany({
+    where: { isActive: true, status: 'CONNECTED' },
+    orderBy: [{ isDefault: 'desc' }, { updatedAt: 'desc' }],
   });
+  const saved = candidates.sort((left, right) => {
+    if (left.isDefault !== right.isDefault) return left.isDefault ? -1 : 1;
+    const leftPriority = Number(decryptIntegrationConfig(left.encryptedConfig).priority || 10);
+    const rightPriority = Number(decryptIntegrationConfig(right.encryptedConfig).priority || 10);
+    return leftPriority - rightPriority;
+  })[0];
   if (saved) {
     const config = decryptIntegrationConfig(saved.encryptedConfig);
     return {
