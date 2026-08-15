@@ -1,0 +1,16 @@
+.git
+.github
+.next
+node_modules
+coverage
+out
+tmp
+
+.env
+.env.*
+!.env.example
+
+*.log
+*.tsbuildinfo
+prisma/*.db
+prisma/*.db-journal
